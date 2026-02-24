@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.env
+.env.*
+*.md
+.replit
+replit.md
+attached_assets
+.cursor
+.idea
+.vscode
+*.log
+npm-debug.log*
