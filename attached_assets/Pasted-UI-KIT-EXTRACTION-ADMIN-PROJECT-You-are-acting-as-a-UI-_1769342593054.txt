@@ -1,0 +1,141 @@
+UI KIT EXTRACTION (ADMIN PROJECT)
+
+You are acting as a UI design system auditor.
+
+Context:
+
+This project is the JoinCloud Admin Dashboard
+
+It already represents the correct visual language for the product
+
+We are going to extract a reusable UI kit from this project
+
+Your task:
+Do NOT write or modify any code.
+Do NOT build new components.
+
+Only analyze the existing codebase and describe the UI system in detail.
+
+1. Color System
+
+Identify and list:
+
+Primary background color(s)
+
+Secondary background / surface color(s)
+
+Border / divider colors
+
+Primary text color
+
+Secondary / muted text color
+
+Accent / action color(s)
+
+Status colors (success, warning, error, info)
+
+Provide:
+
+Color purpose (e.g., “card background”)
+
+Approximate hex or Tailwind class used
+
+2. Typography System
+
+Identify:
+
+Font family used
+
+Font weights in use
+
+Heading levels (H1–H4) with approximate sizes
+
+Body text size
+
+Caption / muted text size
+
+Describe usage rules (where each is used).
+
+3. Spacing & Layout
+
+Extract:
+
+Standard padding for cards
+
+Section spacing (vertical rhythm)
+
+Grid system or column behavior
+
+Border radius values
+
+Shadow styles (if any)
+
+4. Core Reusable Components (Conceptual)
+
+List existing components as concepts, not code:
+
+Card
+
+Table / List
+
+Stat tile
+
+Button variants
+
+Input fields
+
+Toggle / Switch
+
+Badge / Status indicator
+
+Empty state
+
+For each:
+
+Purpose
+
+Variants (if any)
+
+Visual behavior (hover, active, disabled)
+
+5. Dashboard UX Patterns
+
+Identify:
+
+How data density is handled
+
+How empty states are shown
+
+How errors are surfaced
+
+How navigation hierarchy works
+
+6. Dark Theme Rules
+
+Explain:
+
+Contrast strategy
+
+How readability is maintained
+
+Where darker vs lighter surfaces are used
+
+7. UI Kit Extraction Summary
+
+Conclude with:
+
+A list of design tokens that should exist
+
+A list of components that should be part of joincloud-ui-kit
+
+Any UI anti-patterns to avoid while rebuilding
+
+Output format:
+
+Structured markdown
+
+Headings and bullet points
+
+No code blocks unless absolutely necessary
+
+This analysis will be used as the single source of truth for building a new UI kit.

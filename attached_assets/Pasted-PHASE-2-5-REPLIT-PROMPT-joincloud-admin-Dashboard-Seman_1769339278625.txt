@@ -1,0 +1,188 @@
+PHASE 2.5 — REPLIT PROMPT
+joincloud-admin (Dashboard Semantics & Metrics)
+
+Paste this verbatim into Replit AI for joincloud-admin.
+
+CONTEXT
+
+You are working on joincloud-admin, the admin dashboard for JoinCloud.
+
+Telemetry ingestion is already working.
+
+You must now refine analytics semantics, calculations, and dashboard blocks.
+
+🎯 OBJECTIVE (STRICT)
+
+Update the admin backend and dashboard to correctly display:
+
+Uptime metrics
+
+Data processed definition
+
+Daily activity breakdown
+
+Storage health clarity
+
+12-month data retention
+
+Export correctness
+
+1️⃣ UPTIME BLOCK (MANDATORY)
+
+Add a dashboard block:
+
+“Average Daily Uptime”
+
+Compute as:
+
+average uptime = mean(uptime_seconds per user per day)
+
+
+Also allow:
+
+Per-user daily uptime view
+
+Display in hours/minutes
+
+2️⃣ DATA PROCESSED BLOCK (CLARIFY)
+
+Define Data Processed as:
+
+SUM(bytes_uploaded + bytes_downloaded)
+
+
+Label explicitly in UI:
+
+“Total data transferred via JoinCloud (uploads + downloads)”
+
+3️⃣ DAILY ACTIVITY SECTION
+
+Show numeric values + graph:
+
+Per day:
+
+Active users
+
+Files uploaded (count)
+
+Files downloaded (count)
+
+Shares created (count)
+
+Average uptime (hours)
+
+Graph if easy, otherwise table is acceptable.
+
+4️⃣ TOTAL SHARES
+
+Confirm definition:
+
+Total number of shares created (public + LAN)
+
+Do NOT include:
+
+Share opens
+
+Share usage
+
+5️⃣ STORAGE HEALTH (FIX CONFUSION)
+
+Redefine block as:
+
+“Transfer Health”
+
+Show:
+
+Upload bandwidth = bytes_uploaded per day
+
+Download bandwidth = bytes_downloaded per day
+
+This is logical throughput, not network speed.
+
+Label clearly to avoid confusion.
+
+6️⃣ APP VERSIONS / PLATFORMS
+
+Show distribution by:
+
+app_version
+
+os (macOS for now)
+
+Keep structure future-proof for Windows/Linux.
+
+7️⃣ DATA RETENTION (MANDATORY)
+
+Implement retention policy:
+
+Keep daily metrics for 12 months
+
+Automatically delete older records
+
+Document this in README.
+
+8️⃣ EXPORT LOGIC
+
+CSV export must:
+
+Export per-day aggregates
+
+Allow monthly export
+
+Include:
+
+date
+
+active_users
+
+avg_uptime
+
+uploads
+
+downloads
+
+data_processed
+
+shares
+
+Calendar picker is optional.
+
+🎨 UI RULES
+
+Maintain JoinCloud theme:
+
+Primary: #2FB7FF
+
+Background: #0B0B0B
+
+Text: light / white
+
+🚫 HARD CONSTRAINTS
+
+❌ No auth
+
+❌ No user PII
+
+❌ No IP storage
+
+❌ No real-time sockets
+
+❌ No scope creep
+
+✅ DEFINITION OF DONE
+
+Uptime block visible and accurate
+
+Data processed clearly defined
+
+Daily activity understandable
+
+Storage health clarified
+
+Data retention enforced
+
+CSV export correct
+
+🛑 FINAL INSTRUCTION
+
+Stop after completing Phase 2.5.

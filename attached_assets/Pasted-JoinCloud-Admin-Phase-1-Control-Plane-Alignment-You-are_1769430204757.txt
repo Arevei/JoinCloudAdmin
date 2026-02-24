@@ -1,0 +1,197 @@
+JoinCloud Admin Phase 1 (Control Plane Alignment)
+
+You are working on JoinCloud Admin.
+
+You already have a functional telemetry dashboard with:
+
+Node.js + Express + TypeScript
+
+SQLite (better-sqlite3)
+
+Existing endpoint: POST /api/v1/telemetry
+
+Aggregated daily metrics
+
+Dashboard UI
+
+DO NOT rewrite or discard existing telemetry ingestion.
+
+We are now aligning Admin with JoinCloud Desktop v0.3.2, which introduces a control plane layer on top of the existing telemetry system.
+
+🎯 Phase 1 Objective
+
+Extend the existing Admin system to support:
+
+Install registration semantics
+
+Explicit heartbeat & health checks
+
+Device-level visibility
+
+Support messaging
+
+Opt-in logs (time-boxed)
+
+This is NOT a feature expansion for analytics.
+
+🧱 HARD RULES
+
+App → Admin only
+
+Admin is passive (no remote control)
+
+No authentication
+
+UUID-based addressing only
+
+Existing telemetry endpoint MUST remain backward compatible
+
+✅ REQUIRED ADDITIONS (PHASE 1)
+1️⃣ Device Registration (NEW)
+
+Introduce install semantics without breaking telemetry.
+
+Treat clientId as deviceUUID
+
+On first telemetry receipt:
+
+If device does not exist → register it
+
+Assign deviceIndex (incremental integer)
+
+Store:
+
+deviceUUID
+
+deviceIndex
+
+platform / OS
+
+appVersion
+
+firstSeenAt
+
+lastSeenAt
+
+You may add a new endpoint if needed:
+
+POST /install/register
+
+
+…but do not require it for existing clients.
+
+2️⃣ Heartbeat Endpoint (NEW)
+
+Add:
+
+POST /heartbeat
+
+
+Payload:
+
+deviceUUID
+
+uptimeSeconds
+
+backendHealthy
+
+appVersion
+
+Purpose:
+
+Active vs inactive detection
+
+Drives desktop heartbeat indicator
+
+This endpoint must:
+
+Be lightweight
+
+Never aggregate metrics
+
+Always return 200
+
+3️⃣ Health Endpoint (NEW)
+
+Add:
+
+GET /health
+
+
+Returns:
+
+reachable: true
+
+serverTime
+
+adminVersion
+
+Used ONLY for connectivity checks.
+
+4️⃣ Support Messaging (NEW)
+
+Add models + endpoints:
+
+SupportThread
+
+deviceUUID
+
+messages[] (sender, text, timestamp)
+
+Endpoints:
+
+GET  /messages/:deviceUUID
+POST /messages/:deviceUUID/reply
+
+
+Text-only. No push. No sockets.
+
+Add minimal UI to:
+
+View threads
+
+Send admin messages
+
+5️⃣ Logs (NEW, TIME-BOXED)
+
+Add:
+
+POST /logs/batch
+
+
+Accepts array of log events
+
+deviceUUID-scoped
+
+TTL = 30 days
+
+Store minimal metadata only
+
+No dashboard polish required yet.
+
+❌ DO NOT DO
+
+Do not remove /api/v1/telemetry
+
+Do not add authentication
+
+Do not add file-level data
+
+Do not refactor analytics unless required for correctness
+
+✅ PHASE 1 DONE WHEN
+
+Existing telemetry still works
+
+New endpoints exist and are testable
+
+Admin UI shows devices + support threads
+
+/health responds reliably
+
+Logs can be ingested and expire
+
+📌 CONTEXT
+
+Desktop app work has NOT started yet.
+Admin must be stable before any app emission.

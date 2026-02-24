@@ -1,0 +1,209 @@
+REPLIT PROMPT — JoinCloud Phase 2: Admin & Control Plane
+Project Context
+
+You are creating a new, separate Git repository named:
+
+joincloud-admin
+
+
+This project is the JoinCloud Control Plane.
+
+It is NOT the JoinCloud desktop app.
+It exists only to give the admin/founder visibility into how JoinCloud is being used.
+
+The JoinCloud desktop app will later send opt-in, anonymous, aggregated telemetry to this service.
+
+Repository Setup (Mandatory)
+
+Repository name: joincloud-admin
+
+Runtime: Node.js
+
+Add .gitignore → Node
+
+No Git LFS
+
+No binaries committed
+
+Clean Git history
+
+🎯 Phase 2 Scope (Strict — Do Not Exceed)
+
+You must build only the following:
+
+1. Telemetry Ingestion API
+
+Expose a single ingestion endpoint:
+
+POST /api/v1/telemetry
+
+
+Payload format:
+
+{
+  "user_id": "jc_xxxx",
+  "app_version": "0.2.0",
+  "os": "macOS",
+  "metrics": {
+    "uploads_mb": 120,
+    "downloads_mb": 40,
+    "shares_created": 3
+  }
+}
+
+
+Rules:
+
+Validate required fields
+
+Store aggregated metrics only
+
+No raw events
+
+No IP tracking
+
+No authentication (yet)
+
+2. Database Layer (Simple & Reliable)
+
+Use SQLite (best for Replit).
+
+Minimum tables:
+
+users (
+  user_id TEXT PRIMARY KEY,
+  first_seen TIMESTAMP,
+  last_seen TIMESTAMP,
+  app_version TEXT
+)
+
+daily_metrics (
+  user_id TEXT,
+  date DATE,
+  uploads_mb INTEGER,
+  downloads_mb INTEGER,
+  shares_created INTEGER
+)
+
+
+No migrations framework required.
+
+3. Admin Dashboard (Founder-Only)
+
+Create a minimal admin UI that shows:
+
+Total users
+
+Active users (last 7 days)
+
+App version distribution
+
+Aggregate usage metrics
+
+No login system yet.
+Assume trusted/internal access.
+
+🎨 UI / DESIGN RULES (IMPORTANT)
+
+Use the JoinCloud logo color scheme.
+
+From the logo:
+
+Primary (Cloud Blue):
+
+#2FB7FF
+
+
+Background (Dark):
+
+#0B0B0B
+
+
+Text: White / light gray
+
+Design principles:
+
+Dark dashboard theme
+
+Clean, minimal
+
+Data-first UI
+
+No marketing pages
+
+No animations required
+
+🧱 Tech Stack (Preferred)
+
+Backend: Node.js + Express or Fastify
+
+Database: SQLite
+
+UI:
+
+Server-rendered pages OR
+
+Minimal React (only if necessary)
+
+Styling: Plain CSS or Tailwind (dark theme)
+
+Keep dependencies minimal and understandable.
+
+🚫 Hard Constraints (Do NOT Violate)
+
+❌ No user authentication
+
+❌ No billing
+
+❌ No file storage
+
+❌ No social features
+
+❌ No LAN discovery
+
+❌ No SaaS features
+
+❌ No over-engineering
+
+This is Phase 2 only.
+
+📁 Expected Project Structure (Flexible but Clean)
+/
+├─ server/
+│  ├─ index.js
+│  ├─ routes/
+│  ├─ db/
+│  └─ models/
+├─ admin-ui/
+│  ├─ pages/
+│  └─ styles/
+├─ package.json
+├─ README.md
+└─ .gitignore
+
+
+Exact structure may vary, but responsibilities must be separated.
+
+✅ Definition of Done
+
+Telemetry API accepts data
+
+Metrics are stored correctly
+
+Admin dashboard shows real data
+
+UI follows JoinCloud color scheme
+
+Repo is clean and GitHub-ready
+
+No scope creep
+
+🛑 Final Instruction
+
+After completing this:
+
+Stop
+
+Do not implement Phase 3
+
+Do not add extra features

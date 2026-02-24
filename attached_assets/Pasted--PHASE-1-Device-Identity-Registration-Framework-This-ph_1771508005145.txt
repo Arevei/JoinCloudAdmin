@@ -1,0 +1,362 @@
+✅ PHASE 1 — Device Identity + Registration Framework
+
+This phase establishes:
+
+Stable host_uuid
+
+Install tracking (online + deferred offline)
+
+First-seen / last-seen reporting
+
+Version reporting
+
+Control plane host database
+
+No feature locking yet.
+No enforcement yet.
+Pure infrastructure.
+
+🎯 PHASE 1 OBJECTIVES
+Local (Electron App)
+
+Generate deterministic host_uuid
+
+Persist identity safely
+
+Detect first launch
+
+Attempt registration (non-blocking)
+
+Queue registration if offline
+
+Periodic heartbeat ping (lightweight)
+
+Control Plane (Admin Panel Backend)
+
+Accept host registration
+
+Store host metadata
+
+Track first_seen, last_seen
+
+Track version
+
+Track trial_start_at
+
+Show hosts in dashboard
+
+🧱 ARCHITECTURE — PHASE 1
+Local Identity Structure
+
+Stored at:
+
+~/.joincloud/system/identity.json
+
+
+Example:
+
+{
+  "host_uuid": "b7c19f8a...",
+  "installation_id": "uuid-v4",
+  "created_at": 1735689600,
+  "last_seen_at": 1735690100,
+  "version": "1.0.0",
+  "registration_status": "pending"
+}
+
+host_uuid Generation (Safe)
+host_uuid = sha256(
+  machineId +
+  installationSalt
+)
+
+
+Where:
+
+machineId = OS-level machine ID (hashed locally)
+
+installationSalt = random UUIDv4 (generated once)
+
+Never transmit raw machineId
+
+Registration API (Outbound Only)
+POST /api/v1/hosts/register
+
+
+Payload:
+
+{
+  "host_uuid": "...",
+  "installation_id": "...",
+  "version": "1.0.0",
+  "platform": "macos",
+  "arch": "arm64",
+  "first_installed_at": 1735689600
+}
+
+
+Response:
+
+{
+  "status": "registered",
+  "server_time": 1735689650
+}
+
+
+If offline:
+
+Queue payload
+
+Retry every 6 hours
+
+Never block UI
+
+Heartbeat Endpoint
+POST /api/v1/hosts/heartbeat
+
+
+Payload:
+
+{
+  "host_uuid": "...",
+  "version": "1.0.0",
+  "uptime_seconds": 4220
+}
+
+
+Admin panel updates last_seen_at.
+
+Heartbeat interval:
+
+Every 12 hours
+
+Random jitter ± 10%
+
+Never during active transfer
+
+🗄️ CONTROL PLANE DATABASE (Phase 1)
+Table: hosts
+id (pk)
+host_uuid (unique)
+installation_id
+first_seen_at
+last_seen_at
+first_installed_at
+version
+platform
+arch
+trial_start_at
+registration_status
+created_at
+updated_at
+
+🖥️ ADMIN PANEL VIEW
+Hosts Dashboard
+
+Columns:
+
+Host UUID
+
+Version
+
+Platform
+
+First Installed
+
+First Seen
+
+Last Seen
+
+Registration Status
+
+No licensing yet.
+Just observability.
+
+🔒 SECURITY REQUIREMENTS
+
+All endpoints HTTPS only
+
+Rate limit registration
+
+Validate host_uuid format
+
+No raw hardware identifiers accepted
+
+Reject oversized payloads
+
+Log IP separately (do not expose publicly)
+
+🚨 Important
+
+Phase 1 must:
+
+Work fully offline
+
+Never block LAN sharing
+
+Never delay app startup
+
+Retry silently
+
+Be isolated from transfer pipeline
+
+📦 PHASE 1 COMPLETE STATE
+
+After Phase 1:
+
+You can see:
+
+Total installs
+
+Active installs
+
+Version distribution
+
+Online/offline hosts (based on last_seen)
+
+But no licensing enforcement yet.
+
+Now as requested:
+
+At the end of this phase, here are your two structured technical implementation prompts.
+
+🧠 PHASE 1 — ADMIN PANEL IMPLEMENTATION PROMPT
+Implement Phase 1 of JoinCloud Control Plane: Host Registration & Heartbeat Tracking.
+
+Objectives:
+- Create host registration endpoint.
+- Create heartbeat endpoint.
+- Store host records in Postgres.
+- Build admin dashboard view for hosts.
+
+Requirements:
+
+1. Database (Postgres):
+   Create table `hosts` with fields:
+   - id (UUID PK)
+   - host_uuid (VARCHAR UNIQUE NOT NULL)
+   - installation_id (VARCHAR NOT NULL)
+   - first_seen_at (TIMESTAMP NOT NULL)
+   - last_seen_at (TIMESTAMP NOT NULL)
+   - first_installed_at (TIMESTAMP NOT NULL)
+   - version (VARCHAR NOT NULL)
+   - platform (VARCHAR NOT NULL)
+   - arch (VARCHAR NOT NULL)
+   - registration_status (VARCHAR DEFAULT 'registered')
+   - created_at
+   - updated_at
+
+2. API Endpoints (Express):
+   POST /api/v1/hosts/register
+   - Validate payload
+   - Upsert host by host_uuid
+   - Set first_seen_at if new
+   - Update last_seen_at
+   - Return JSON success response
+
+   POST /api/v1/hosts/heartbeat
+   - Validate host_uuid
+   - Update last_seen_at + version
+   - Return 200
+
+3. Validation & Security:
+   - Enforce JSON schema validation
+   - Reject malformed UUID
+   - Add rate limiting
+   - Enforce HTTPS only
+   - Log IP internally but do not expose in UI
+
+4. Admin Dashboard:
+   - Hosts list page
+   - Paginated
+   - Sort by last_seen_at
+   - Filter by version and platform
+   - Display:
+       host_uuid
+       version
+       platform
+       first_seen_at
+       last_seen_at
+
+5. Performance:
+   - Index host_uuid
+   - Index last_seen_at
+   - Ensure upsert is efficient
+
+6. Observability:
+   - Log registration events
+   - Log heartbeat updates
+   - No PII logging
+
+Do NOT push until verified locally.
+
+Verification Checklist:
+- Can register new host.
+- Re-registering does not duplicate.
+- Heartbeat updates last_seen_at.
+- Dashboard reflects changes.
+- No crashes if duplicate requests.
+- Rate limiting works.
+- Invalid payloads rejected.
+
+🧠 PHASE 1 — JOINCLOUD (ELECTRON) IMPLEMENTATION PROMPT
+Implement Phase 1: Device Identity & Registration Module in JoinCloud Electron App.
+
+Objectives:
+- Generate stable host_uuid.
+- Persist identity.
+- Attempt outbound registration.
+- Queue if offline.
+- Implement heartbeat mechanism.
+
+Requirements:
+
+1. Create module: /core/device-identity
+   - Generate installationSalt (UUIDv4)
+   - Fetch OS machineId (hashed locally)
+   - Compute host_uuid = sha256(machineId + installationSalt)
+   - Store in ~/.joincloud/system/identity.json
+
+2. Create module: /core/registration-client
+   - Method: registerHost()
+   - Method: sendHeartbeat()
+   - Use HTTPS POST
+   - Timeout 2s
+   - Non-blocking
+   - Retry on failure (exponential backoff)
+
+3. Offline Handling:
+   - If registration fails, store pending payload locally.
+   - Retry every 6 hours.
+   - Do not block app startup.
+
+4. Heartbeat:
+   - Trigger every 12 hours (with ±10% jitter).
+   - Skip during active file transfers.
+   - Must not interfere with streaming pipeline.
+
+5. Logging:
+   - Log registration success/failure.
+   - Do not log hardware identifiers.
+   - No console spam.
+
+6. Security:
+   - Do not send raw machineId.
+   - Do not send LAN IP.
+   - Use certificate validation.
+   - Handle server errors gracefully.
+
+7. Performance:
+   - Must not delay app launch > 100ms.
+   - No synchronous filesystem blocking in hot path.
+
+Do NOT push until verified locally.
+
+Verification Checklist:
+- Fresh install generates identity.json.
+- Re-launch does not regenerate host_uuid.
+- Registration succeeds when online.
+- Offline install queues properly.
+- Heartbeat updates correctly.
+- No impact on LAN file transfer performance.
+- No crash if server unreachable.

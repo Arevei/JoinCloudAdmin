@@ -1,0 +1,160 @@
+CONTEXT
+
+You are working on joincloud-admin, the admin analytics dashboard for JoinCloud.
+
+Phase 3.1 (Network Presence) and Phase 3.2 (Network Settings & Controls) have been completed on the desktop app.
+
+You must now fully align the admin backend and dashboard with these phases.
+
+This update is analytics-only.
+No new product features are introduced.
+
+🎯 OBJECTIVE (STRICT)
+
+Update joincloud-admin to:
+
+Accept network presence + network control telemetry
+
+Store it safely (anonymous, aggregated)
+
+Display meaningful, founder-level insights
+
+Preserve backward compatibility
+
+📡 TELEMETRY PAYLOAD (EXTENDED, BACKWARD SAFE)
+
+Extend the accepted daily payload to optionally include:
+
+{
+  "network_visibility_enabled": true,
+  "network_peers_detected": 2,
+  "display_name_customized": false
+}
+
+
+Rules:
+
+All fields are optional
+
+Older clients must still be accepted
+
+Reject unexpected data types
+
+Do NOT store display names or peer identifiers
+
+🗄️ DATABASE CHANGES
+
+Extend daily_metrics table with:
+
+network_visibility_enabled BOOLEAN DEFAULT true,
+network_peers_detected INTEGER DEFAULT 0,
+display_name_customized BOOLEAN DEFAULT false
+
+
+Notes:
+
+One row per user per day
+
+network_peers_detected = daily max or avg (document which)
+
+No historical identity linkage
+
+📊 DASHBOARD UPDATES (MANDATORY)
+1️⃣ Network Presence Overview
+
+Show:
+
+% of active users who detected ≥1 peer
+
+Average peers detected per active user
+
+Label clearly:
+
+“Peers detected on the same local network”
+
+2️⃣ Network Visibility Breakdown
+
+Show:
+
+% users with visibility ON
+
+% users with visibility OFF
+
+This explains missing presence data.
+
+3️⃣ Presence vs Uptime (Key Insight)
+
+Compare:
+
+Avg daily uptime (visibility ON)
+
+Avg daily uptime (visibility OFF)
+
+Display as hours.
+
+4️⃣ Personalization Signal
+
+Show:
+
+% users who customized display name
+
+(Do NOT show names.)
+
+🎨 UI RULES
+
+Use existing JoinCloud theme
+
+Add cards/blocks only
+
+No layout redesign
+
+Charts optional, numbers acceptable
+
+📄 DOCUMENTATION UPDATE (MANDATORY)
+
+Update README to include a new section:
+
+“Network Presence Analytics”
+
+Explicitly state:
+
+Presence is local-only
+
+Metrics are anonymous and aggregated
+
+No device data, names, or identifiers are stored
+
+Visibility toggle affects analytics
+
+🚫 HARD CONSTRAINTS
+
+❌ No authentication
+
+❌ No user drill-down views
+
+❌ No device or network identifiers
+
+❌ No raw peer data
+
+❌ No scope creep into Phase 4
+
+✅ DEFINITION OF DONE
+
+Admin accepts Phase 3 telemetry
+
+Dashboard reflects presence + controls
+
+Older desktop versions still work
+
+No sensitive data introduced
+
+🛑 FINAL INSTRUCTION
+
+After completing this update:
+
+Stop immediately
+
+Do not begin Phase 4 work
+
+Required Completion Message
+joincloud-admin aligned with Phase 3.1 and 3.2 telemetry

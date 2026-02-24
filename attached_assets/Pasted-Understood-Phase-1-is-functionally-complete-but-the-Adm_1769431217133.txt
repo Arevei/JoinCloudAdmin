@@ -1,0 +1,229 @@
+Understood. Phase 1 is **functionally complete**, but the **Admin UI information architecture is not aligned** with how you want to *operate* and *manage* JoinCloud.
+
+Below is a **UI-only change plan** for **JoinCloud Admin (Replit)**.
+This does **not change APIs, telemetry, or data models**—only **how data is presented and managed**.
+
+This is written as a **clear execution prompt you can give to Replit**.
+
+---
+
+# 🔁 REPLIT PROMPT — JoinCloud Admin UI Restructure (Phase 1 UI Alignment)
+
+You are updating the **JoinCloud Admin UI**.
+Backend, telemetry ingestion, and APIs are already complete.
+
+Your task is to **restructure the UI navigation and screens** to match the operational needs below.
+
+**No backend refactors unless strictly required for UI queries.**
+
+---
+
+## 🎯 Goal
+
+Create a **clear left-side navigation** and reorganize screens so that:
+
+* Admin can monitor the system at a glance
+* Drill down **per user/device**
+* Identify **most active users**
+* Manage **support conversations cleanly**
+
+---
+
+## 🧭 GLOBAL UI CHANGE (MANDATORY)
+
+### Left-Side Navigation (Persistent)
+
+Add a **left sidebar menu** with these items **in this exact order**:
+
+1. **Dashboard**
+2. **Users**
+3. **Leaderboard**
+4. **Support**
+
+Sidebar should:
+
+* Be visible on all admin pages
+* Highlight active section
+* Be responsive (collapse allowed)
+
+---
+
+## 📊 1️⃣ Dashboard (No Logic Change)
+
+### Purpose
+
+System-level overview (what exists today).
+
+### What to Show
+
+Keep **exactly what the current main screen shows**, including:
+
+* Total installs
+* Active users (7d)
+* Avg uptime
+* Total data processed
+* Shares (LAN vs Public)
+* Charts / trends
+
+### Changes Required
+
+* Move existing dashboard UI under **Dashboard** menu
+* No new metrics required
+
+---
+
+## 👥 2️⃣ Users (Device-Centric View)
+
+### Purpose
+
+Operate JoinCloud **per user/device**, not as raw analytics.
+
+---
+
+### Users List Page
+
+Each **User Card / Row** represents **one deviceUUID**.
+
+Show on each card:
+
+* deviceUUID (shortened)
+* deviceIndex
+* Platform (macOS)
+* App version
+* Last seen
+* Heartbeat status (● green / yellow / red)
+
+Each card must have **two clear action buttons**:
+
+1. **User Analytics**
+2. **Support**
+
+---
+
+### User Analytics View (Per User)
+
+When clicking **User Analytics**:
+
+Show analytics **only for that user**, such as:
+
+* Uptime (daily / total)
+* Files uploaded
+* Files shared
+* Public vs LAN shares
+* Activity timeline
+
+This is **filtered reuse of existing analytics**, not new computation.
+
+---
+
+### Support Shortcut (Per User)
+
+Clicking **Support** from a user card:
+
+* Opens the **Support thread** for that user
+* Same as Support section, but pre-filtered
+
+---
+
+## 🏆 3️⃣ Leaderboard (Engagement Ranking)
+
+### Purpose
+
+Identify **most active users** quickly.
+
+---
+
+### Leaderboard View
+
+Show ranked lists (tabs or sections):
+
+* Top users by **Uptime**
+* Top users by **Files Uploaded**
+* Top users by **Shares Created**
+
+Each leaderboard entry shows:
+
+* Rank
+* deviceIndex / short UUID
+* Metric value
+* Quick “View User” action
+
+Leaderboard uses **existing aggregated data** only.
+
+No gamification, no scoring system.
+
+---
+
+## 💬 4️⃣ Support (Conversation-Centric)
+
+### Purpose
+
+Act as a **support inbox**, not a user list.
+
+---
+
+### Support Main View
+
+Show **user cards only when messages exist**.
+
+Each card shows:
+
+* deviceUUID / deviceIndex
+* Last message snippet
+* Last activity time
+* Unread indicator (if admin hasnels)
+
+Clicking a card opens:
+
+* Full message history
+* Admin reply box (text-only)
+
+---
+
+### Behavior Rules
+
+* Messages are grouped **by user**
+* Order by most recent activity
+* No deletion yet
+* No status automation yet
+
+---
+
+## ❌ DO NOT DO
+
+* Do not add authentication
+* Do not add roles
+* Do not add user names or emails
+* Do not add real-time sockets
+* Do not change telemetry contracts
+
+---
+
+## ✅ UI CHANGE COMPLETE WHEN
+
+* Sidebar exists and works
+* Dashboard unchanged but relocated
+* Users page shows cards with **Analytics + Support**
+* Leaderboard ranks users correctly
+* Support inbox shows conversations cleanly
+* Navigation feels operational, not analytical
+
+---
+
+## 🧭 What Happens After This
+
+Once this UI restructure is complete and verified:
+
+👉 We **lock Admin UI for v0.3.2**
+👉 Move Cursor to **Phase 2 — Local App Telemetry Engine**
+👉 Start emitting install + heartbeat safely
+
+---
+
+If you want, next I can:
+
+* Review screenshots and validate UX flow
+* Write **Cursor Phase 2 prompt** that matches this Admin UI
+* Or define **exact queries each screen should use**
+
+Tell me the next step.

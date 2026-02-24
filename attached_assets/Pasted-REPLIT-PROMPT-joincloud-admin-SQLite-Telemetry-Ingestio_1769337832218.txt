@@ -1,0 +1,196 @@
+REPLIT PROMPT — joincloud-admin (SQLite + Telemetry Ingestion)
+Context
+
+You are working on a Node.js project named joincloud-admin.
+This project is the admin/control-plane backend for the JoinCloud desktop app.
+
+The desktop app automatically sends anonymous, aggregated operational telemetry.
+This is not user data, not file data, and not personal data.
+
+Your task is to install and use SQLite and build the minimum viable admin backend.
+
+🎯 Objective (STRICT)
+
+Install and configure SQLite
+
+Create a local SQLite database
+
+Implement telemetry ingestion
+
+Store aggregated metrics
+
+Render a minimal admin dashboard
+
+Nothing more.
+
+🧱 SQLite Requirements (Important)
+
+Use SQLite (file-based DB)
+
+Store DB file locally in project (e.g. data/telemetry.db)
+
+Do NOT use ORM-heavy frameworks
+
+Prefer better-sqlite3 or sqlite3
+
+📡 Telemetry API (MANDATORY)
+
+Expose exactly one endpoint:
+
+POST /api/v1/telemetry
+
+
+Accept only this payload shape:
+
+{
+  "user_id": "jc_xxxx",
+  "date": "YYYY-MM-DD",
+  "app_version": "x.y.z",
+  "os": "macOS",
+  "uptime_seconds": 12345,
+  "metrics": {
+    "files_uploaded": 12,
+    "files_downloaded": 7,
+    "bytes_uploaded": 104857600,
+    "bytes_downloaded": 52428800,
+    "shares_created": 5,
+    "public_shares": 2,
+    "lan_shares": 3
+  }
+}
+
+
+Rules:
+
+Validate required fields
+
+Reject unknown payloads
+
+Do NOT log request bodies
+
+Do NOT store IP addresses or headers
+
+🗄️ Database Schema (Create Automatically)
+
+Create tables if they do not exist:
+
+users (
+  user_id TEXT PRIMARY KEY,
+  first_seen TEXT,
+  last_seen TEXT,
+  app_version TEXT,
+  os TEXT
+);
+
+daily_metrics (
+  user_id TEXT,
+  date TEXT,
+  uptime_seconds INTEGER,
+  files_uploaded INTEGER,
+  files_downloaded INTEGER,
+  bytes_uploaded INTEGER,
+  bytes_downloaded INTEGER,
+  shares_created INTEGER,
+  public_shares INTEGER,
+  lan_shares INTEGER,
+  PRIMARY KEY (user_id, date)
+);
+
+
+Rules:
+
+One row per user per day
+
+Upsert on conflict
+
+No raw event storage
+
+📊 Admin Dashboard (Minimal)
+
+Create a basic dashboard page that shows:
+
+Total users
+
+Active users (last 7 days)
+
+Total uptime (sum)
+
+Total data uploaded/downloaded
+
+Share counts
+
+App version distribution
+
+🎨 UI Styling (Required)
+
+Use JoinCloud branding:
+
+Primary color: #2FB7FF
+
+Background: #0B0B0B
+
+Text: white / light gray
+
+Rules:
+
+Dark theme
+
+Clean layout
+
+No marketing content
+
+No animations
+
+🚫 Hard Constraints (DO NOT VIOLATE)
+
+❌ No authentication
+
+❌ No cookies
+
+❌ No tracking pixels
+
+❌ No user profiles
+
+❌ No billing
+
+❌ No SaaS features
+
+❌ No over-engineering
+
+This is internal admin only.
+
+📄 Documentation (Required)
+
+Update README.md to clearly state:
+
+This service collects anonymous operational telemetry
+
+No file data, names, paths, or contents
+
+Metrics are aggregated only
+
+Used for product improvement and reliability
+
+✅ Definition of Done
+
+SQLite is installed and working
+
+Telemetry POST endpoint works
+
+Data is persisted correctly
+
+Dashboard renders real data
+
+Repo runs cleanly on Replit
+
+No scope creep
+
+🛑 Final Instruction
+
+After completion:
+
+Stop
+
+Do not implement discovery, auth, or accounts
+
+Do not suggest next phases
