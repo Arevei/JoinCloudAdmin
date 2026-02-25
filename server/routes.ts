@@ -26,6 +26,9 @@ import { verifyRazorpaySignature, handleRazorpayWebhook } from "./razorpay-webho
 
 const ADMIN_VERSION = "1.0.0";
 
+/** Trial duration in days for first-time sign-in (configurable via TRIAL_DAYS env, default 7). */
+const TRIAL_DAYS = Math.max(1, parseInt(process.env.TRIAL_DAYS || "7", 10) || 7);
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -507,7 +510,7 @@ export async function registerRoutes(
             tier: "trial",
             device_limit: 5,
             issued_at: now,
-            expires_at: now + 7 * 24 * 3600,
+            expires_at: now + TRIAL_DAYS * 24 * 3600,
             state: "trial_active",
             features: { smart_workspaces: true, activity_feed: true },
           };
@@ -607,7 +610,7 @@ export async function registerRoutes(
       await storage.ensureDeviceAccount(host_uuid);
       const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
       const issuedAt = now;
-      const expiresAt = issuedAt + 7 * 24 * 3600;
+      const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
       const state = "trial_active";
       const payload = {
         license_id: licenseId,
@@ -675,7 +678,7 @@ export async function registerRoutes(
         if (!account.trialUsed) {
           const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
           const issuedAt = Math.floor(Date.now() / 1000);
-          const expiresAt = issuedAt + 7 * 24 * 3600; // 7 days
+          const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
           const state = "trial_active";
           const payload = {
             license_id: licenseId,
@@ -1516,6 +1519,7 @@ export async function registerRoutes(
           license: { state: "UNREGISTERED", tier: "", device_limit: 0, expires_at: 0, features: {} },
           activation: { required: true },
           telemetry: { default_enabled: true },
+          trial_days: TRIAL_DAYS,
           logout_requested: !!logoutRequested,
         });
         return;
@@ -1554,6 +1558,7 @@ export async function registerRoutes(
         },
         activation: { required: false },
         telemetry: { default_enabled: true },
+        trial_days: TRIAL_DAYS,
         subscription: subscription ?? undefined,
         account_id: license.accountId,
         account_email: accountEmail,
