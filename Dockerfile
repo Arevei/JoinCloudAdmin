@@ -11,7 +11,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 COPY . .
-RUN ./node_modules/.bin/tsx script/build.ts
+RUN node node_modules/tsx/dist/cli.mjs script/build.ts
 
 # ---- Production ----
 FROM node:20-alpine AS runner
