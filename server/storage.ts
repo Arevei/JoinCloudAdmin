@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { mkdirSync } from 'fs';
 import { 
   type TelemetryPayload, 
   type DashboardStats, 
@@ -15,6 +16,8 @@ import {
 } from "@shared/schema";
 
 const dbPath = process.env.JOINCLOUD_CONTROL_PLANE_DB_PATH || join(process.cwd(), 'data', 'telemetry.db');
+const dbDir = dirname(dbPath);
+mkdirSync(dbDir, { recursive: true });
 const db = new Database(dbPath);
 
 // Initialize schema with Phase 1 control plane tables
