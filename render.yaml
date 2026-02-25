@@ -1,0 +1,27 @@
+# Render Blueprint — deploy JoinCloud Admin as a Web Service
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Option A: Native Node (no Docker)
+#   - Connect repo, select this blueprint, add env vars, deploy.
+# Option B: Docker
+#   - In Render dashboard create Web Service → connect repo → set "Docker" as environment.
+
+services:
+  - type: web
+    name: joincloud-admin
+    runtime: node
+    region: oregon
+
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Optional: override SQLite path (default: ./data/telemetry.db)
+      # - key: JOINCLOUD_CONTROL_PLANE_DB_PATH
+      #   sync: false
+    # Optional: mount persistent disk for SQLite (Render Disks)
+    # disk:
+    #   name: joincloud-data
+    #   mountPath: /opt/render/project/src/data
