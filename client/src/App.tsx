@@ -7,15 +7,16 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import Dashboard from "@/pages/Dashboard";
 import Users from "@/pages/Users";
+import UserDetails from "@/pages/UserDetails";
 import UserAnalytics from "@/pages/UserAnalytics";
 import Leaderboard from "@/pages/Leaderboard";
-import Hosts from "@/pages/Hosts";
 import SupportInbox from "@/pages/SupportInbox";
 import SupportThread from "@/pages/SupportThread";
 import Accounts from "@/pages/Accounts";
 import Licenses from "@/pages/Licenses";
 import Subscriptions from "@/pages/Subscriptions";
 import UsageAggregates from "@/pages/UsageAggregates";
+import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -23,8 +24,8 @@ function Router() {
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/users" component={Users} />
+      <Route path="/users/:deviceUUID" component={UserDetails} />
       <Route path="/users/:deviceUUID/analytics" component={UserAnalytics} />
-      <Route path="/hosts" component={Hosts} />
       <Route path="/leaderboard" component={Leaderboard} />
       <Route path="/support" component={SupportInbox} />
       <Route path="/support/:deviceUUID" component={SupportThread} />
@@ -32,6 +33,7 @@ function Router() {
       <Route path="/licenses" component={Licenses} />
       <Route path="/subscriptions" component={Subscriptions} />
       <Route path="/usage" component={UsageAggregates} />
+      <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>
   );

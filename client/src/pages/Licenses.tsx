@@ -1,8 +1,25 @@
 import { useState, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Key, Ban, CalendarPlus, ChevronDown, ChevronRight, UserMinus, UserPlus } from "lucide-react";
+import { Key, Ban, CalendarPlus, ChevronDown, ChevronRight, UserMinus, UserPlus, Settings, Share2, HardDrive, Users, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -40,6 +57,7 @@ interface License {
   expiresAt: number;
   state: string;
   hostCount: number;
+  firstDeviceId?: string | null;
   createdAt: string;
   updatedAt: string;
   planInterval?: string | null;
@@ -68,6 +86,16 @@ export default function Licenses() {
     customUsersOrStorage?: number;
     customPairingDevices?: number;
   } | null>(null);
+
+  const [modifyLicense, setModifyLicense] = useState<License | null>(null);
+  const [modifyForm, setModifyForm] = useState({
+    tier: "pro" as "trial" | "pro" | "teams" | "custom",
+    deviceLimit: 5,
+    shareLimit: 200,
+    teamEnabled: false,
+    extendDuration: "none" as "none" | "7d" | "30d" | "90d" | "180d" | "365d",
+    customDays: 30,
+  });
 
   const { data: licenses, isLoading, error } = useQuery<License[]>({
     queryKey: ["/api/admin/licenses"],
@@ -280,6 +308,79 @@ export default function Licenses() {
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
+  const modifyMutation = useMutation({
+    mutationFn: async ({ licenseId, updates }: { 
+      licenseId: string; 
+      updates: {
+        tier?: string;
+        deviceLimit?: number;
+        customQuota?: number;
+        extendDuration?: string;
+        extendTrialDays?: number;
+      }
+    }) => {
+      const res = await fetch(`/api/admin/licenses/${licenseId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.message || "Failed to modify license");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
+      setModifyLicense(null);
+      toast({ title: "License updated successfully" });
+    },
+    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
+  });
+
+  const openModifyDialog = (license: License) => {
+    setModifyLicense(license);
+    setModifyForm({
+      tier: license.tier as "trial" | "pro" | "teams" | "custom",
+      deviceLimit: license.deviceLimit,
+      shareLimit: license.customQuota ?? (license.tier === "pro" ? 200 : license.tier === "teams" ? 1000 : 10),
+      teamEnabled: license.tier === "teams" || license.tier === "custom",
+      extendDuration: "none",
+      customDays: 30,
+    });
+  };
+
+  const handleModifySave = () => {
+    if (!modifyLicense) return;
+    const updates: {
+      tier?: string;
+      deviceLimit?: number;
+      customQuota?: number;
+      extendDuration?: string;
+      extendTrialDays?: number;
+    } = {};
+
+    if (modifyForm.tier !== modifyLicense.tier) {
+      updates.tier = modifyForm.tier;
+    }
+    if (modifyForm.deviceLimit !== modifyLicense.deviceLimit) {
+      updates.deviceLimit = modifyForm.deviceLimit;
+    }
+    if (modifyForm.shareLimit !== (modifyLicense.customQuota ?? 0)) {
+      updates.customQuota = modifyForm.shareLimit;
+    }
+    if (modifyForm.extendDuration && modifyForm.extendDuration !== "none") {
+      updates.extendDuration = modifyForm.extendDuration;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      toast({ title: "No changes to save" });
+      return;
+    }
+
+    modifyMutation.mutate({ licenseId: modifyLicense.id, updates });
+  };
+
   const formatDate = (ts: number) =>
     new Date(ts * 1000).toLocaleDateString("en-US", {
       month: "short",
@@ -287,15 +388,57 @@ export default function Licenses() {
       year: "numeric",
     });
 
-  const stateBadge = (state: string) => {
-    const v: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-      trial_active: "default",
-      active: "secondary",
-      grace: "outline",
-      expired: "destructive",
-      revoked: "outline",
+  const getPlanDisplay = (tier: string): { label: string; color: string } => {
+    const colors: Record<string, string> = {
+      trial: "bg-blue-500/20 text-blue-400",
+      pro: "bg-emerald-500/20 text-emerald-400",
+      teams: "bg-purple-500/20 text-purple-400",
+      custom: "bg-amber-500/20 text-amber-400",
     };
-    return <Badge variant={v[state] ?? "outline"}>{state}</Badge>;
+    
+    if (tier === "pro" || tier === "teams" || tier === "custom" || tier === "trial") {
+      return { label: tier.charAt(0).toUpperCase() + tier.slice(1), color: colors[tier] };
+    }
+    
+    return { label: tier?.toUpperCase() || "—", color: "bg-muted" };
+  };
+
+  const planBadge = (tier: string) => {
+    const { label, color } = getPlanDisplay(tier);
+    return (
+      <span className={`px-2 py-0.5 rounded text-xs font-medium ${color}`}>
+        {label}
+      </span>
+    );
+  };
+
+  const getStatusDisplay = (state: string): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } => {
+    // Trial state - show "Trial" status
+    if (state === "trial_active") {
+      return { label: "Trial", variant: "secondary" };
+    }
+    
+    // Active paid state
+    if (state === "active") {
+      return { label: "Active", variant: "default" };
+    }
+    
+    // Grace period
+    if (state === "grace") {
+      return { label: "Grace Period", variant: "destructive" };
+    }
+    
+    // Not active states
+    if (state === "expired" || state === "revoked") {
+      return { label: "Not Active", variant: "outline" };
+    }
+    
+    return { label: "Not Active", variant: "outline" };
+  };
+
+  const stateBadge = (state: string) => {
+    const { label, variant } = getStatusDisplay(state);
+    return <Badge variant={variant}>{label}</Badge>;
   };
 
   if (error) {
@@ -418,9 +561,10 @@ export default function Licenses() {
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
                   <TableHead>ID</TableHead>
-                  <TableHead>Account (email)</TableHead>
-                  <TableHead>State</TableHead>
-                  <TableHead>Tier</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead>Device ID</TableHead>
+                  <TableHead>Plan</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Devices</TableHead>
                   <TableHead>Expires</TableHead>
                   <TableHead>Renewal / Grace</TableHead>
@@ -444,9 +588,29 @@ export default function Licenses() {
                         )}
                       </TableCell>
                       <TableCell className="font-mono text-xs">{l.id}</TableCell>
-                      <TableCell className="text-sm">{l.accountEmail ?? l.accountId?.slice(0, 12) + "…" ?? "—"}</TableCell>
+                      <TableCell className="text-sm">
+                        {l.accountEmail && !l.accountEmail.endsWith("@device.local")
+                          ? l.accountEmail
+                          : "Anonymous Device"}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs max-w-[140px]">
+                        {l.firstDeviceId ? (
+                          <span
+                            title={l.firstDeviceId}
+                            className="truncate block cursor-pointer hover:text-primary"
+                            onClick={() => {
+                              navigator.clipboard.writeText(l.firstDeviceId!);
+                              toast({ title: "Device ID copied" });
+                            }}
+                          >
+                            {l.firstDeviceId}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                      <TableCell>{planBadge(l.tier)}</TableCell>
                       <TableCell>{stateBadge(l.state)}</TableCell>
-                      <TableCell>{l.tier}</TableCell>
                       <TableCell>
                         {l.hostCount} / {l.deviceLimit}
                       </TableCell>
@@ -459,6 +623,16 @@ export default function Licenses() {
                         {!l.renewalAt && !l.graceEndsAt ? "—" : null}
                       </TableCell>
                       <TableCell className="text-right space-x-2">
+                        {l.state !== "revoked" && (
+                          <Button
+                            variant="default"
+                            size="sm"
+                            onClick={() => openModifyDialog(l)}
+                          >
+                            <Settings className="w-3 h-3 mr-1" />
+                            Modify
+                          </Button>
+                        )}
                         {l.state !== "revoked" && (
                           <Button
                             variant="outline"
@@ -483,7 +657,7 @@ export default function Licenses() {
                     </TableRow>
                     {expandedId === l.id && (
                       <TableRow key={`${l.id}-hosts`}>
-                        <TableCell colSpan={9} className="bg-white/5 p-4">
+                        <TableCell colSpan={10} className="bg-white/5 p-4">
                           {l.tier === "teams" && (
                             <div className="mb-4">
                               <h4 className="text-sm font-medium text-white mb-2">Team members (max 5)</h4>
@@ -542,7 +716,16 @@ export default function Licenses() {
                             <ul className="space-y-2">
                               {licenseHosts!.hosts.map((h) => (
                                 <li key={h.host_uuid} className="flex items-center justify-between gap-2 text-sm">
-                                  <span className="font-mono text-muted-foreground">{h.host_uuid.slice(0, 8)}…{h.host_uuid.slice(-4)}</span>
+                                  <span
+                                    title={h.host_uuid}
+                                    className="font-mono text-muted-foreground truncate max-w-[200px] cursor-pointer hover:text-primary"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(h.host_uuid);
+                                      toast({ title: "Device ID copied" });
+                                    }}
+                                  >
+                                    {h.host_uuid}
+                                  </span>
                                   <span className="flex items-center gap-2">
                                     {h.isOnline ? (
                                       <Badge variant="default" className="bg-green-600">Active</Badge>
@@ -676,6 +859,146 @@ export default function Licenses() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Modify License Dialog */}
+      <Dialog open={!!modifyLicense} onOpenChange={(open) => !open && setModifyLicense(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Settings className="w-5 h-5" />
+              Modify License
+            </DialogTitle>
+            <DialogDescription>
+              {modifyLicense && (
+                <>
+                  Modify settings for <strong>{modifyLicense.accountEmail || "Anonymous Device"}</strong>
+                  <br />
+                  <span className="text-xs font-mono text-muted-foreground">ID: {modifyLicense.id}</span>
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {modifyLicense && (
+            <div className="space-y-6 py-4">
+              {/* Plan Tier */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <Key className="w-4 h-4" />
+                  Plan Tier
+                </Label>
+                <Select
+                  value={modifyForm.tier}
+                  onValueChange={(v) => setModifyForm((f) => ({ ...f, tier: v as typeof f.tier }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modifyLicense.state === "trial_active" && (
+                      <SelectItem value="trial">Trial</SelectItem>
+                    )}
+                    <SelectItem value="pro">Pro</SelectItem>
+                    <SelectItem value="teams">Teams</SelectItem>
+                    <SelectItem value="custom">Custom</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Device Limit */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <HardDrive className="w-4 h-4" />
+                  Device Limit
+                </Label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={modifyForm.deviceLimit}
+                  onChange={(e) => setModifyForm((f) => ({ ...f, deviceLimit: parseInt(e.target.value, 10) || 1 }))}
+                  className="w-full rounded border bg-background px-3 py-2 text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Current usage: {modifyLicense.hostCount} / {modifyLicense.deviceLimit}
+                </p>
+              </div>
+
+              {/* Share Limit */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <Share2 className="w-4 h-4" />
+                  Monthly Share Limit
+                </Label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  value={modifyForm.shareLimit}
+                  onChange={(e) => setModifyForm((f) => ({ ...f, shareLimit: parseInt(e.target.value, 10) || 0 }))}
+                  className="w-full rounded border bg-background px-3 py-2 text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Set to 0 for unlimited shares
+                </p>
+              </div>
+
+              {/* Team Creation */}
+              {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
+                <div className="flex items-center justify-between">
+                  <Label className="flex items-center gap-2">
+                    <Users className="w-4 h-4" />
+                    Team Creation Enabled
+                  </Label>
+                  <Switch
+                    checked={modifyForm.teamEnabled}
+                    onCheckedChange={(checked) => setModifyForm((f) => ({ ...f, teamEnabled: checked }))}
+                  />
+                </div>
+              )}
+
+              {/* Extend Duration */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <Clock className="w-4 h-4" />
+                  {modifyLicense.state === "trial_active" ? "Extend Trial" : "Extend License"}
+                </Label>
+                <Select
+                  value={modifyForm.extendDuration}
+                  onValueChange={(v) => setModifyForm((f) => ({ ...f, extendDuration: v as typeof f.extendDuration }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select duration..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No extension</SelectItem>
+                    <SelectItem value="7d">7 days</SelectItem>
+                    <SelectItem value="30d">30 days (1 month)</SelectItem>
+                    <SelectItem value="90d">90 days (3 months)</SelectItem>
+                    <SelectItem value="180d">180 days (6 months)</SelectItem>
+                    <SelectItem value="365d">365 days (1 year)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Current expiry: {formatDate(modifyLicense.expiresAt)}
+                </p>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setModifyLicense(null)}>
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleModifySave}
+              disabled={modifyMutation.isPending}
+            >
+              {modifyMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

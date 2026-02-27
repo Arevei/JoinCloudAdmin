@@ -120,6 +120,31 @@ try {
 try {
   db.exec(`ALTER TABLE hosts ADD COLUMN trial_start_at TEXT`);
 } catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE hosts ADD COLUMN trial_ends_at TEXT`);
+} catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE hosts ADD COLUMN trial_extended_at TEXT`);
+} catch (e) { /* column already exists */ }
+
+// Device trial bootstrap + monthly share usage
+db.exec(`
+  CREATE TABLE IF NOT EXISTS device_trials (
+    device_id TEXT PRIMARY KEY,
+    trial_started_at TEXT NOT NULL,
+    trial_ends_at TEXT NOT NULL,
+    trial_extended_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS device_usage_monthly (
+    device_id TEXT NOT NULL,
+    ym TEXT NOT NULL,
+    shares_created INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, ym)
+  );
+`);
 
 // Phase 3: Stripe subscription fields on accounts
 try { db.exec(`ALTER TABLE accounts ADD COLUMN stripe_customer_id TEXT`); } catch (e) { /* exists */ }
@@ -132,9 +157,42 @@ try { db.exec(`ALTER TABLE licenses ADD COLUMN plan_interval TEXT`); } catch (e)
 try { db.exec(`ALTER TABLE licenses ADD COLUMN grace_ends_at INTEGER`); } catch (e) { /* exists */ }
 try { db.exec(`ALTER TABLE licenses ADD COLUMN renewal_at INTEGER`); } catch (e) { /* exists */ }
 try { db.exec(`ALTER TABLE licenses ADD COLUMN custom_quota INTEGER`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN user_limit INTEGER`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN team_limit INTEGER`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN share_limit_monthly INTEGER`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN devices_per_user INTEGER`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN overrides_json TEXT`); } catch (e) { /* exists */ }
 // Razorpay: payment provider fields
 try { db.exec(`ALTER TABLE accounts ADD COLUMN razorpay_customer_id TEXT`); } catch (e) { /* exists */ }
 try { db.exec(`ALTER TABLE accounts ADD COLUMN razorpay_subscription_id TEXT`); } catch (e) { /* exists */ }
+// Username for display name (Join <username>)
+try { db.exec(`ALTER TABLE accounts ADD COLUMN username TEXT`); } catch (e) { /* exists */ }
+
+// Billing/Payment tracking fields
+try { db.exec(`ALTER TABLE licenses ADD COLUMN payment_method TEXT`); } catch (e) { /* exists */ } // 'online' | 'offline' | 'offer'
+try { db.exec(`ALTER TABLE licenses ADD COLUMN amount_paid INTEGER`); } catch (e) { /* exists */ } // in smallest currency unit (e.g., paise/cents)
+try { db.exec(`ALTER TABLE licenses ADD COLUMN currency TEXT DEFAULT 'INR'`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN payment_provider TEXT`); } catch (e) { /* exists */ } // 'stripe' | 'razorpay' | 'manual'
+try { db.exec(`ALTER TABLE licenses ADD COLUMN invoice_id TEXT`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN discount_percent INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE licenses ADD COLUMN notes TEXT`); } catch (e) { /* exists */ }
+
+// Team invitation emails (pending team members before signup)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS team_invitations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    invited_by TEXT NOT NULL,
+    invited_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    UNIQUE(license_id, email),
+    FOREIGN KEY (license_id) REFERENCES licenses(id),
+    FOREIGN KEY (invited_by) REFERENCES accounts(id)
+  );
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_team_invitations_email ON team_invitations(email)`); } catch (e) { /* exists */ }
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_team_invitations_license ON team_invitations(license_id)`); } catch (e) { /* exists */ }
 
 // Create index for log cleanup
 try {
@@ -216,6 +274,15 @@ try {
 try {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_usage_aggregates_host ON usage_aggregates(host_uuid)`);
 } catch (e) { /* exists */ }
+
+// App settings (key-value, e.g. payment_mode)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+try { db.exec(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('payment_mode', 'LIVE')`); } catch (e) { /* exists */ }
 
 // Device-only trial: track which devices have ever used a trial (to block second trial after revoke/expiry)
 db.exec(`
@@ -300,6 +367,7 @@ export interface SupportThreadPreview {
 export interface Account {
   id: string;
   email: string;
+  username?: string | null;
   trialUsed: boolean;
   createdAt: string;
   updatedAt: string;
@@ -327,6 +395,37 @@ export interface License {
   graceEndsAt?: number | null;
   renewalAt?: number | null;
   customQuota?: number | null;
+  paymentMethod?: string | null;
+  amountPaid?: number | null;
+  currency?: string | null;
+  paymentProvider?: string | null;
+  invoiceId?: string | null;
+  discountPercent?: number | null;
+  notes?: string | null;
+}
+
+export interface TeamInvitation {
+  id: number;
+  licenseId: string;
+  email: string;
+  invitedBy: string;
+  invitedAt: string;
+  status: string;
+}
+
+export interface BillingSummary {
+  totalMonthlyRevenue: number;
+  totalYearlyRevenue: number;
+  totalActiveSubscriptions: number;
+  totalTrialAccounts: number;
+  revenueByTier: { tier: string; monthly: number; yearly: number; count: number }[];
+  revenueByProvider: { provider: string; amount: number; count: number }[];
+}
+
+export interface AccountWithBilling extends Account {
+  license?: License | null;
+  teamMembers?: Array<{ accountId: string; email: string; role: string }>;
+  teamInvitations?: TeamInvitation[];
 }
 
 export interface LicenseHost {
@@ -384,6 +483,8 @@ export interface IStorage {
   getAccountByRazorpayCustomerId(customerId: string): Promise<Account | null>;
   getAccountByRazorpaySubscriptionId(subscriptionId: string): Promise<Account | null>;
   updateAccountRazorpay(accountId: string, updates: { razorpayCustomerId?: string; razorpaySubscriptionId?: string; subscriptionStatus?: string; renewalAt?: string | null; graceEndsAt?: string | null }): Promise<void>;
+  updateAccountUsername(accountId: string, username: string): Promise<void>;
+  updateAccountPassword(accountId: string, passwordHash: string): Promise<void>;
   getPasswordHash(accountId: string): string | null;
   setAccountTrialUsed(accountId: string): Promise<void>;
   createLicense(license: { id: string; accountId: string; tier: string; deviceLimit: number; issuedAt: number; expiresAt: number; state: string; signature: string; planInterval?: string; graceEndsAt?: number; renewalAt?: number; customQuota?: number }): Promise<License>;
@@ -413,6 +514,13 @@ export interface IStorage {
   ensureDeviceAccount(hostUuid: string): Promise<void>;
   isDeviceTrialUsed(hostUuid: string): boolean;
   setDeviceTrialUsed(hostUuid: string): void;
+  // Device trial bootstrap (no auth)
+  getOrCreateDeviceTrial(deviceId: string, trialDays?: number): Promise<{ trialStartedAt: string; trialEndsAt: string; trialExtendedAt: string | null }>;
+  extendDeviceTrial(deviceId: string, extraDays: number): Promise<{ trialEndsAt: string }>;
+  canExtendDeviceTrial(deviceId: string): boolean;
+  // Monthly share usage
+  getMonthlyShareCount(deviceId: string, ym: string): number;
+  incrementMonthlyShares(deviceId: string, ym: string): Promise<{ count: number }>;
 }
 
 export class SqliteStorage implements IStorage {
@@ -1313,6 +1421,7 @@ export class SqliteStorage implements IStorage {
     return {
       id: row.id,
       email: row.email,
+      username: row.username ?? null,
       trialUsed: row.trial_used === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1324,6 +1433,16 @@ export class SqliteStorage implements IStorage {
       razorpayCustomerId: row.razorpay_customer_id ?? null,
       razorpaySubscriptionId: row.razorpay_subscription_id ?? null,
     };
+  }
+
+  async updateAccountUsername(accountId: string, username: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare("UPDATE accounts SET username = ?, updated_at = ? WHERE id = ?").run(username.trim() || null, now, accountId);
+  }
+
+  async updateAccountPassword(accountId: string, passwordHash: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare("UPDATE accounts SET password_hash = ?, updated_at = ? WHERE id = ?").run(passwordHash, now, accountId);
   }
 
   async getAccountByRazorpayCustomerId(customerId: string): Promise<Account | null> {
@@ -1534,6 +1653,13 @@ export class SqliteStorage implements IStorage {
       graceEndsAt: row.grace_ends_at != null ? Number(row.grace_ends_at) : null,
       renewalAt: row.renewal_at != null ? Number(row.renewal_at) : null,
       customQuota: row.custom_quota != null ? Number(row.custom_quota) : null,
+      paymentMethod: row.payment_method ?? null,
+      amountPaid: row.amount_paid != null ? Number(row.amount_paid) : null,
+      currency: row.currency ?? 'INR',
+      paymentProvider: row.payment_provider ?? null,
+      invoiceId: row.invoice_id ?? null,
+      discountPercent: row.discount_percent != null ? Number(row.discount_percent) : null,
+      notes: row.notes ?? null,
     };
   }
 
@@ -1591,15 +1717,18 @@ export class SqliteStorage implements IStorage {
     return rows.map(r => this.mapAccountRow(r));
   }
 
-  async listLicensesWithHostCounts(): Promise<Array<License & { hostCount: number }>> {
+  async listLicensesWithHostCounts(): Promise<Array<License & { hostCount: number; firstDeviceId?: string | null }>> {
     const rows = db.prepare(`
-      SELECT l.*, (SELECT COUNT(*) FROM license_hosts WHERE license_id = l.id) as host_count
+      SELECT l.*,
+        (SELECT COUNT(*) FROM license_hosts WHERE license_id = l.id) as host_count,
+        (SELECT host_uuid FROM license_hosts WHERE license_id = l.id ORDER BY activated_at ASC LIMIT 1) as first_device_id
       FROM licenses l
       ORDER BY l.created_at DESC
     `).all() as any[];
     return rows.map(r => ({
       ...this.mapLicenseRow(r),
       hostCount: Number(r.host_count ?? 0),
+      firstDeviceId: r.first_device_id ?? null,
     }));
   }
 
@@ -1638,6 +1767,63 @@ export class SqliteStorage implements IStorage {
     db.prepare('INSERT OR IGNORE INTO device_trial_used (host_uuid) VALUES (?)').run(hostUuid);
   }
 
+  async getOrCreateDeviceTrial(deviceId: string, trialDays = 7): Promise<{ trialStartedAt: string; trialEndsAt: string; trialExtendedAt: string | null }> {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const endsAt = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+    const endsAtIso = endsAt.toISOString();
+
+    const existing = db.prepare('SELECT trial_started_at, trial_ends_at, trial_extended_at FROM device_trials WHERE device_id = ?').get(deviceId) as any;
+    if (existing) {
+      return {
+        trialStartedAt: existing.trial_started_at,
+        trialEndsAt: existing.trial_ends_at,
+        trialExtendedAt: existing.trial_extended_at ?? null,
+      };
+    }
+
+    db.prepare(`
+      INSERT INTO device_trials (device_id, trial_started_at, trial_ends_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(deviceId, nowIso, endsAtIso, nowIso, nowIso);
+    return { trialStartedAt: nowIso, trialEndsAt: endsAtIso, trialExtendedAt: null };
+  }
+
+  async extendDeviceTrial(deviceId: string, extraDays = 7): Promise<{ trialEndsAt: string }> {
+    const now = new Date().toISOString();
+    const row = db.prepare('SELECT trial_ends_at, trial_extended_at FROM device_trials WHERE device_id = ?').get(deviceId) as any;
+    if (!row) throw new Error('Device trial not found');
+    if (row.trial_extended_at) throw new Error('Trial already extended');
+    const baseEnd = new Date(row.trial_ends_at);
+    const newEnds = new Date(baseEnd.getTime() + extraDays * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('UPDATE device_trials SET trial_extended_at = ?, trial_ends_at = ?, updated_at = ? WHERE device_id = ?').run(now, newEnds, now, deviceId);
+    return { trialEndsAt: newEnds };
+  }
+
+  canExtendDeviceTrial(deviceId: string): boolean {
+    const row = db.prepare('SELECT trial_extended_at FROM device_trials WHERE device_id = ?').get(deviceId) as any;
+    if (!row) return false;
+    return !row.trial_extended_at;
+  }
+
+  getMonthlyShareCount(deviceId: string, ym: string): number {
+    const row = db.prepare('SELECT shares_created FROM device_usage_monthly WHERE device_id = ? AND ym = ?').get(deviceId, ym) as any;
+    return Number(row?.shares_created ?? 0);
+  }
+
+  async incrementMonthlyShares(deviceId: string, ym: string): Promise<{ count: number }> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO device_usage_monthly (device_id, ym, shares_created, updated_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(device_id, ym) DO UPDATE SET
+        shares_created = shares_created + 1,
+        updated_at = excluded.updated_at
+    `).run(deviceId, ym, now);
+    const row = db.prepare('SELECT shares_created FROM device_usage_monthly WHERE device_id = ? AND ym = ?').get(deviceId, ym) as any;
+    return { count: Number(row?.shares_created ?? 0) };
+  }
+
   setLogoutRequested(hostUuid: string): void {
     const now = new Date().toISOString();
     db.prepare('INSERT OR REPLACE INTO device_logout_requests (host_uuid, requested_at) VALUES (?, ?)').run(hostUuid, now);
@@ -1648,6 +1834,218 @@ export class SqliteStorage implements IStorage {
     if (!row) return false;
     db.prepare('DELETE FROM device_logout_requests WHERE host_uuid = ?').run(hostUuid);
     return true;
+  }
+
+  getSetting(key: string): string | null {
+    const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string): void {
+    db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run(key, value);
+  }
+
+  // === BILLING & SUBSCRIPTIONS ===
+  async getBillingSummary(): Promise<BillingSummary> {
+    const now = Math.floor(Date.now() / 1000);
+    
+    // Get all active licenses with payment info
+    const licenses = db.prepare(`
+      SELECT l.*, a.email 
+      FROM licenses l
+      LEFT JOIN accounts a ON l.account_id = a.id
+      WHERE l.state IN ('active', 'grace', 'trial_active')
+    `).all() as any[];
+    
+    let totalMonthlyRevenue = 0;
+    let totalYearlyRevenue = 0;
+    let totalActiveSubscriptions = 0;
+    let totalTrialAccounts = 0;
+    
+    const tierStats: Record<string, { monthly: number; yearly: number; count: number }> = {};
+    const providerStats: Record<string, { amount: number; count: number }> = {};
+    
+    for (const lic of licenses) {
+      const amount = Number(lic.amount_paid ?? 0);
+      const interval = lic.plan_interval ?? 'monthly';
+      const tier = lic.tier || 'pro';
+      const provider = lic.payment_provider || 'manual';
+      
+      if (lic.state === 'trial_active') {
+        totalTrialAccounts++;
+        continue;
+      }
+      
+      totalActiveSubscriptions++;
+      
+      // Calculate monthly equivalent
+      const monthlyAmount = interval === 'yearly' ? amount / 12 : amount;
+      const yearlyAmount = interval === 'yearly' ? amount : amount * 12;
+      
+      totalMonthlyRevenue += monthlyAmount;
+      totalYearlyRevenue += yearlyAmount;
+      
+      // By tier
+      if (!tierStats[tier]) tierStats[tier] = { monthly: 0, yearly: 0, count: 0 };
+      tierStats[tier].monthly += monthlyAmount;
+      tierStats[tier].yearly += yearlyAmount;
+      tierStats[tier].count++;
+      
+      // By provider
+      if (!providerStats[provider]) providerStats[provider] = { amount: 0, count: 0 };
+      providerStats[provider].amount += amount;
+      providerStats[provider].count++;
+    }
+    
+    return {
+      totalMonthlyRevenue,
+      totalYearlyRevenue,
+      totalActiveSubscriptions,
+      totalTrialAccounts,
+      revenueByTier: Object.entries(tierStats).map(([tier, stats]) => ({ tier, ...stats })),
+      revenueByProvider: Object.entries(providerStats).map(([provider, stats]) => ({ provider, ...stats })),
+    };
+  }
+
+  async getAccountWithBilling(accountId: string): Promise<AccountWithBilling | null> {
+    const account = await this.getAccountById(accountId);
+    if (!account) return null;
+    
+    const license = await this.getActiveLicenseForAccount(accountId);
+    let teamMembers: Array<{ accountId: string; email: string; role: string }> = [];
+    let teamInvitations: TeamInvitation[] = [];
+    
+    if (license && license.tier === 'teams') {
+      teamMembers = await this.getLicenseMembers(license.id);
+      teamInvitations = await this.getTeamInvitations(license.id);
+    }
+    
+    return {
+      ...account,
+      license,
+      teamMembers,
+      teamInvitations,
+    };
+  }
+
+  async listAccountsWithBilling(): Promise<AccountWithBilling[]> {
+    const accounts = await this.listAccounts();
+    const result: AccountWithBilling[] = [];
+    
+    for (const account of accounts) {
+      const license = await this.getActiveLicenseForAccount(account.id);
+      let teamMembers: Array<{ accountId: string; email: string; role: string }> = [];
+      let teamInvitations: TeamInvitation[] = [];
+      
+      if (license && license.tier === 'teams') {
+        teamMembers = await this.getLicenseMembers(license.id);
+        teamInvitations = await this.getTeamInvitations(license.id);
+      }
+      
+      result.push({
+        ...account,
+        license,
+        teamMembers,
+        teamInvitations,
+      });
+    }
+    
+    return result;
+  }
+
+  // === TEAM INVITATIONS ===
+  async getTeamInvitations(licenseId: string): Promise<TeamInvitation[]> {
+    const rows = db.prepare(`
+      SELECT * FROM team_invitations WHERE license_id = ? ORDER BY invited_at DESC
+    `).all(licenseId) as any[];
+    
+    return rows.map(r => ({
+      id: r.id,
+      licenseId: r.license_id,
+      email: r.email,
+      invitedBy: r.invited_by,
+      invitedAt: r.invited_at,
+      status: r.status,
+    }));
+  }
+
+  async addTeamInvitation(licenseId: string, email: string, invitedBy: string): Promise<TeamInvitation> {
+    const now = new Date().toISOString();
+    const result = db.prepare(`
+      INSERT INTO team_invitations (license_id, email, invited_by, invited_at, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `).run(licenseId, email.toLowerCase(), invitedBy, now);
+    
+    return {
+      id: Number(result.lastInsertRowid),
+      licenseId,
+      email: email.toLowerCase(),
+      invitedBy,
+      invitedAt: now,
+      status: 'pending',
+    };
+  }
+
+  async removeTeamInvitation(invitationId: number): Promise<void> {
+    db.prepare('DELETE FROM team_invitations WHERE id = ?').run(invitationId);
+  }
+
+  async getTeamInvitationByEmail(email: string): Promise<TeamInvitation | null> {
+    const row = db.prepare(`
+      SELECT * FROM team_invitations WHERE email = ? AND status = 'pending' ORDER BY invited_at DESC LIMIT 1
+    `).get(email.toLowerCase()) as any;
+    
+    if (!row) return null;
+    
+    return {
+      id: row.id,
+      licenseId: row.license_id,
+      email: row.email,
+      invitedBy: row.invited_by,
+      invitedAt: row.invited_at,
+      status: row.status,
+    };
+  }
+
+  async acceptTeamInvitation(invitationId: number, accountId: string): Promise<void> {
+    const invitation = db.prepare('SELECT * FROM team_invitations WHERE id = ?').get(invitationId) as any;
+    if (!invitation) throw new Error('Invitation not found');
+    
+    // Add member to license
+    await this.addLicenseMember(invitation.license_id, accountId);
+    
+    // Mark invitation as accepted
+    db.prepare("UPDATE team_invitations SET status = 'accepted' WHERE id = ?").run(invitationId);
+  }
+
+  async updateLicenseBilling(licenseId: string, updates: {
+    paymentMethod?: string;
+    amountPaid?: number;
+    currency?: string;
+    paymentProvider?: string;
+    invoiceId?: string;
+    discountPercent?: number;
+    notes?: string;
+  }): Promise<void> {
+    const parts: string[] = [];
+    const values: any[] = [];
+    
+    if (updates.paymentMethod !== undefined) { parts.push('payment_method = ?'); values.push(updates.paymentMethod); }
+    if (updates.amountPaid !== undefined) { parts.push('amount_paid = ?'); values.push(updates.amountPaid); }
+    if (updates.currency !== undefined) { parts.push('currency = ?'); values.push(updates.currency); }
+    if (updates.paymentProvider !== undefined) { parts.push('payment_provider = ?'); values.push(updates.paymentProvider); }
+    if (updates.invoiceId !== undefined) { parts.push('invoice_id = ?'); values.push(updates.invoiceId); }
+    if (updates.discountPercent !== undefined) { parts.push('discount_percent = ?'); values.push(updates.discountPercent); }
+    if (updates.notes !== undefined) { parts.push('notes = ?'); values.push(updates.notes); }
+    
+    if (parts.length === 0) return;
+    
+    const now = new Date().toISOString();
+    parts.push('updated_at = ?');
+    values.push(now);
+    values.push(licenseId);
+    
+    db.prepare(`UPDATE licenses SET ${parts.join(', ')} WHERE id = ?`).run(...values);
   }
 }
 

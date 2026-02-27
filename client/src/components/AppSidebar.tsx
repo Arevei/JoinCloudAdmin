@@ -18,11 +18,11 @@ import {
   Trophy, 
   MessageSquare,
   Activity,
-  Server,
   Key,
   CreditCard,
   Receipt,
   BarChart3,
+  Settings,
 } from "lucide-react";
 
 interface SupportThreadPreview {
@@ -35,11 +35,6 @@ const menuItems = [
     title: "Dashboard",
     url: "/",
     icon: LayoutDashboard,
-  },
-  {
-    title: "Hosts",
-    url: "/hosts",
-    icon: Server,
   },
   {
     title: "Users",
@@ -75,6 +70,11 @@ const menuItems = [
     title: "Usage",
     url: "/usage",
     icon: BarChart3,
+  },
+  {
+    title: "Settings",
+    url: "/settings",
+    icon: Settings,
   },
 ];
 

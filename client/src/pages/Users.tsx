@@ -9,7 +9,8 @@ import {
   MessageSquare,
   BarChart3,
   Search,
-  LogOut
+  LogOut,
+  User,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -238,7 +239,18 @@ export default function Users() {
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  <Link href={`/users/${device.deviceUUID}/analytics`} className="flex-1 min-w-[100px]">
+                  <Link href={`/users/${device.deviceUUID}`} className="flex-1 min-w-[80px]">
+                    <Button 
+                      variant="default" 
+                      size="sm" 
+                      className="w-full"
+                      data-testid={`button-details-${device.deviceIndex}`}
+                    >
+                      <User className="w-4 h-4 mr-1.5" />
+                      Details
+                    </Button>
+                  </Link>
+                  <Link href={`/users/${device.deviceUUID}/analytics`} className="flex-1 min-w-[80px]">
                     <Button 
                       variant="outline" 
                       size="sm" 
@@ -246,10 +258,10 @@ export default function Users() {
                       data-testid={`button-analytics-${device.deviceIndex}`}
                     >
                       <BarChart3 className="w-4 h-4 mr-1.5" />
-                      User Analytics
+                      Analytics
                     </Button>
                   </Link>
-                  <Link href={`/support/${device.deviceUUID}`} className="flex-1 min-w-[100px]">
+                  <Link href={`/support/${device.deviceUUID}`} className="flex-1 min-w-[80px]">
                     <Button 
                       variant="outline" 
                       size="sm" 

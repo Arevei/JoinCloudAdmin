@@ -19,6 +19,14 @@ import {
 } from "@shared/schema";
 import { signToken, requireAuth, authRateLimit } from "./auth";
 import { signLicense, verifyLicenseSignature } from "./license-sign";
+import {
+  type EntitlementsResponse,
+  type LicenseState,
+  type Tier,
+  TIER_DEFAULTS,
+  mergeEntitlements,
+  resolveEntitlementsByState,
+} from "./entitlements";
 import { sendLicenseGrantEmail } from "./mailer";
 import Stripe from "stripe";
 import { handleStripeWebhook } from "./stripe-webhook";
@@ -382,6 +390,11 @@ export async function registerRoutes(
   app.options("/api/v1/auth/register", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/auth/login", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/auth/desktop-token", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/dev/activate-plan", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/public/billing-mode", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/devices/bootstrap-trial", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/devices/usage/shares/increment", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/trial/extend-token", (req, res) => { setCors(req, res); res.sendStatus(204); });
 
   // === PHASE 2: AUTH ===
   app.post("/api/v1/auth/register", authRateLimit, async (req, res) => {
@@ -396,10 +409,39 @@ export async function registerRoutes(
       const hash = await bcrypt.hash(password, 10);
       const id = crypto.randomUUID();
       const account = await storage.createAccount(id, email, hash);
+      
+      // Check for pending team invitation for this email
+      const pendingInvitation = await storage.getTeamInvitationByEmail(email);
+      let teamInfo: { licenseId: string; teamOwnerEmail: string } | null = null;
+      
+      if (pendingInvitation) {
+        try {
+          // Accept the invitation and add user to team
+          await storage.acceptTeamInvitation(pendingInvitation.id, account.id);
+          
+          // Get team owner info for response
+          const license = await storage.getLicenseById(pendingInvitation.licenseId);
+          if (license) {
+            const ownerAccount = await storage.getAccountById(license.accountId);
+            if (ownerAccount) {
+              teamInfo = {
+                licenseId: pendingInvitation.licenseId,
+                teamOwnerEmail: ownerAccount.email,
+              };
+            }
+          }
+          console.log(`User ${email} auto-joined team from invitation ${pendingInvitation.id}`);
+        } catch (invErr) {
+          console.error("Failed to process team invitation:", invErr);
+          // Don't fail registration if team assignment fails
+        }
+      }
+      
       const token = signToken({ accountId: account.id, email: account.email });
       res.status(201).json({
         user: { id: account.id, email: account.email },
         token,
+        team: teamInfo,
       });
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -451,6 +493,124 @@ export async function registerRoutes(
     }
   });
 
+  // === DEVICE BOOTSTRAP TRIAL (no auth) ===
+  app.post("/api/v1/devices/bootstrap-trial", async (req, res) => {
+    setCors(req, res);
+    try {
+      const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
+      const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+      const now = new Date();
+      const trialEnds = new Date(trial.trialEndsAt);
+      const isExpired = now >= trialEnds;
+
+      if (!isExpired) {
+        let license = await storage.getLicenseForHost(deviceId);
+        if (!license) {
+          const accountId = `device_${deviceId}`;
+          const existingAccount = await storage.getAccountById(accountId);
+          if (!existingAccount) {
+            await storage.createAccount(accountId, `Device ${deviceId.slice(0, 12)}…`, ".");
+          }
+          const nowSec = Math.floor(Date.now() / 1000);
+          const expiresAt = Math.floor(trialEnds.getTime() / 1000);
+          const licenseId = `lic_trial_${deviceId}`;
+          const { signLicense } = await import("./license-sign");
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: accountId,
+            tier: "trial",
+            device_limit: 5,
+            issued_at: nowSec,
+            expires_at: expiresAt,
+            state: "trial_active",
+          });
+          await storage.createLicense({
+            id: licenseId,
+            accountId,
+            tier: "trial",
+            deviceLimit: 5,
+            issuedAt: nowSec,
+            expiresAt,
+            state: "trial_active",
+            signature,
+          });
+          await storage.ensureHostRow(deviceId);
+          await storage.addLicenseHost(licenseId, deviceId);
+        }
+      }
+
+      const canExtend = storage.canExtendDeviceTrial(deviceId);
+      const entitlements = resolveEntitlementsByState(
+        isExpired ? "EXPIRED" : "TRIAL",
+        "FREE",
+        trial.trialEndsAt,
+        canExtend
+      );
+      const response: EntitlementsResponse = {
+        licenseState: isExpired ? "EXPIRED" : "TRIAL",
+        tier: isExpired ? "FREE" : "TRIAL",
+        trialEndsAt: trial.trialEndsAt,
+        graceEndsAt: null,
+        entitlements,
+      };
+      res.json(response);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Bootstrap trial error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === MONTHLY SHARE USAGE ===
+  app.post("/api/v1/devices/usage/shares/increment", async (req, res) => {
+    setCors(req, res);
+    try {
+      const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
+      const now = new Date();
+      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const { count } = await storage.incrementMonthlyShares(deviceId, ym);
+
+      const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+      const trialEnds = new Date(trial.trialEndsAt);
+      const limit = now >= trialEnds ? TIER_DEFAULTS.FREE.shareLimitMonthly : 1000;
+      const allowed = count <= limit;
+      res.json({ allowed, remaining: Math.max(0, limit - count), limit });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === TRIAL EXTEND TOKEN (auth required) ===
+  const trialExtendTokens = new Map<string, { deviceId: string; expiresAt: number }>();
+  app.post("/api/v1/trial/extend-token", requireAuth, (req, res) => {
+    setCors(req, res);
+    try {
+      const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
+      if (!storage.canExtendDeviceTrial(deviceId)) {
+        res.status(400).json({ message: "Trial already extended or not found" });
+        return;
+      }
+      const token = crypto.randomUUID();
+      const expiresAt = Date.now() + 60_000;
+      trialExtendTokens.set(token, { deviceId, expiresAt });
+      setTimeout(() => trialExtendTokens.delete(token), 60_000);
+      res.json({ token });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   // === DESKTOP AUTH: Website-to-Desktop deep-link login ===
   // In-memory store for one-time desktop auth tokens (60 s TTL).
   const desktopAuthTokens = new Map<string, { accountId: string; email: string; deviceId: string; expiresAt: number }>();
@@ -477,6 +637,31 @@ export async function registerRoutes(
   app.post("/api/desktop/verify", async (req, res) => {
     try {
       const { token } = z.object({ token: z.string().uuid() }).parse(req.body);
+
+      const trialExtendEntry = trialExtendTokens.get(token);
+      if (trialExtendEntry && trialExtendEntry.expiresAt >= Date.now()) {
+        trialExtendTokens.delete(token);
+        const { deviceId } = trialExtendEntry;
+        await storage.extendDeviceTrial(deviceId, 7);
+        const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+        const response: EntitlementsResponse = {
+          licenseState: "TRIAL",
+          tier: "FREE",
+          trialEndsAt: trial.trialEndsAt,
+          graceEndsAt: null,
+          entitlements: {
+            ...TIER_DEFAULTS.FREE,
+            shareLimitMonthly: 1000,
+            teamEnabled: true,
+            canExtendTrial: false,
+            uiTeasers: { showTeamsMenu: true, teamsLocked: false },
+          },
+        };
+        res.json(response);
+        return;
+      }
+      trialExtendTokens.delete(token);
+
       const entry = desktopAuthTokens.get(token);
       if (!entry || entry.expiresAt < Date.now()) {
         desktopAuthTokens.delete(token);
@@ -497,6 +682,12 @@ export async function registerRoutes(
       }
 
       let license = await storage.getLicenseForHost(deviceId);
+
+      // Migrate: if device has device_ license but user signed in with real account, move device to real account
+      if (license && license.accountId.startsWith("device_") && !accountId.startsWith("device_")) {
+        await storage.removeLicenseHost(license.id, deviceId);
+        license = null;
+      }
 
       if (!license) {
         license = await storage.getActiveLicenseForAccount(accountId);
@@ -754,6 +945,90 @@ export async function registerRoutes(
     }
   });
 
+  // DEV-only: instant license grant (no Razorpay). Requires payment_mode=DEV and NODE_ENV !== production.
+  app.post("/api/v1/dev/activate-plan", requireAuth, async (req, res) => {
+    setCors(req, res);
+    try {
+      const paymentMode = storage.getSetting("payment_mode") ?? "LIVE";
+      if (paymentMode !== "DEV") {
+        res.status(403).json({ message: "DEV activation is only available when payment_mode is DEV" });
+        return;
+      }
+      if (process.env.NODE_ENV === "production") {
+        res.status(403).json({ message: "DEV activation is disabled in production" });
+        return;
+      }
+      const auth = (req as any).auth as { accountId: string; email: string };
+      const body = z.object({
+        plan: z.enum(["PRO", "TEAMS", "pro", "teams"]),
+        deviceId: z.string().nullable().optional(),
+      }).parse(req.body);
+      const tier = body.plan.toUpperCase() === "TEAMS" ? "teams" : "pro";
+      const deviceLimit = tier === "teams" ? 5 : 5;
+      const now = Math.floor(Date.now() / 1000);
+      const PAID_PLAN_DAYS = 30;
+      const expiresAt = now + PAID_PLAN_DAYS * 24 * 3600; // 30 days from now
+      const licenseId = `LIC-${Date.now()}-${auth.accountId.slice(0, 8)}`;
+      const payload = {
+        license_id: licenseId,
+        account_id: auth.accountId,
+        tier,
+        device_limit: deviceLimit,
+        issued_at: now,
+        expires_at: expiresAt,
+        state: "active",
+        features: { smart_workspaces: true, activity_feed: true },
+      };
+      const signature = signLicense(payload);
+      const existingLicense = await storage.getActiveLicenseForAccount(auth.accountId);
+      if (existingLicense) {
+        const updatePayload = {
+          license_id: existingLicense.id,
+          account_id: existingLicense.accountId,
+          tier,
+          device_limit: deviceLimit,
+          issued_at: existingLicense.issuedAt,
+          expires_at: payload.expires_at,
+          state: "active",
+          features: { smart_workspaces: true, activity_feed: true },
+        };
+        const newSig = signLicense(updatePayload);
+        await storage.updateLicense(existingLicense.id, { tier, deviceLimit, expiresAt: payload.expires_at, signature: newSig });
+        if (body.deviceId && body.deviceId.length >= 8 && body.deviceId.length <= 128) {
+          await storage.ensureHostRow(body.deviceId);
+          const count = storage.getLicenseHostsCount(existingLicense.id);
+          if (count < deviceLimit) {
+            try { await storage.addLicenseHost(existingLicense.id, body.deviceId); } catch (_) { /* already linked */ }
+          }
+        }
+        res.json({ success: true, tier, licenseState: "ACTIVE" });
+        return;
+      }
+      await storage.createLicense({
+        id: licenseId,
+        accountId: auth.accountId,
+        tier,
+        deviceLimit,
+        issuedAt: now,
+        expiresAt: payload.expires_at,
+        state: "active",
+        signature,
+      });
+      if (body.deviceId && body.deviceId.length >= 8 && body.deviceId.length <= 128) {
+        await storage.ensureHostRow(body.deviceId);
+        try { await storage.addLicenseHost(licenseId, body.deviceId); } catch (_) { /* already linked */ }
+      }
+      res.json({ success: true, tier, licenseState: "ACTIVE" });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("DEV activate-plan error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   app.post("/api/v1/license/validate", async (req, res) => {
     try {
       const body = z.object({
@@ -988,6 +1263,180 @@ export async function registerRoutes(
       res.json(aggregates);
     } catch (err) {
       console.error("Usage aggregates error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Admin settings (payment_mode: LIVE | DEV)
+  app.get("/api/v1/admin/settings", async (req, res) => {
+    try {
+      const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
+      res.json({ payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE" });
+    } catch (err) {
+      console.error("Admin settings error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/v1/admin/settings/payment-mode", async (req, res) => {
+    try {
+      const body = z.object({
+        payment_mode: z.enum(["LIVE", "DEV"]),
+      }).parse(req.body);
+      storage.setSetting("payment_mode", body.payment_mode);
+      res.json({ payment_mode: body.payment_mode });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Set payment mode error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Public billing mode (no auth; used by JoinCloud-Web to decide Razorpay vs DEV activate)
+  app.get("/api/v1/public/billing-mode", (req, res) => {
+    setCors(req, res);
+    try {
+      const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
+      res.json({ payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE" });
+    } catch (err) {
+      console.error("Billing mode error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ADMIN: BILLING & SUBSCRIPTIONS ===
+  app.get("/api/admin/billing/summary", async (req, res) => {
+    try {
+      const summary = await storage.getBillingSummary();
+      res.json(summary);
+    } catch (err) {
+      console.error("Billing summary error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.get("/api/admin/accounts-with-billing", async (req, res) => {
+    try {
+      const accounts = await storage.listAccountsWithBilling();
+      res.json(accounts);
+    } catch (err) {
+      console.error("Accounts with billing error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.get("/api/admin/accounts/:accountId", async (req, res) => {
+    try {
+      const account = await storage.getAccountWithBilling(req.params.accountId);
+      if (!account) {
+        res.status(404).json({ message: "Account not found" });
+        return;
+      }
+      res.json(account);
+    } catch (err) {
+      console.error("Account details error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Update license billing info (payment method, amount, etc.)
+  app.patch("/api/admin/licenses/:licenseId/billing", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const body = z.object({
+        paymentMethod: z.enum(["online", "offline", "offer"]).optional(),
+        amountPaid: z.number().int().min(0).optional(),
+        currency: z.string().max(3).optional(),
+        paymentProvider: z.enum(["stripe", "razorpay", "manual"]).optional(),
+        invoiceId: z.string().max(255).optional(),
+        discountPercent: z.number().int().min(0).max(100).optional(),
+        notes: z.string().max(1000).optional(),
+      }).parse(req.body);
+      
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+      
+      await storage.updateLicenseBilling(licenseId, body);
+      const updated = await storage.getLicenseById(licenseId);
+      res.json(updated);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Update license billing error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ADMIN: TEAM INVITATIONS ===
+  app.get("/api/admin/licenses/:licenseId/invitations", async (req, res) => {
+    try {
+      const invitations = await storage.getTeamInvitations(req.params.licenseId);
+      res.json(invitations);
+    } catch (err) {
+      console.error("Get team invitations error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/licenses/:licenseId/invitations", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const body = z.object({
+        email: z.string().email(),
+      }).parse(req.body);
+      
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+      if (license.tier !== "teams") {
+        res.status(400).json({ message: "Team invitations only available for Teams licenses" });
+        return;
+      }
+      
+      // Check if already a member
+      const members = await storage.getLicenseMembers(licenseId);
+      const existingMember = members.find(m => m.email.toLowerCase() === body.email.toLowerCase());
+      if (existingMember) {
+        res.status(400).json({ message: "User is already a team member" });
+        return;
+      }
+      
+      // Check team size limit
+      const userCount = storage.getTeamsLicenseUserCount(licenseId);
+      if (userCount >= 5) {
+        res.status(400).json({ message: "Team has reached maximum 5 users" });
+        return;
+      }
+      
+      const invitation = await storage.addTeamInvitation(licenseId, body.email, license.accountId);
+      res.json(invitation);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Add team invitation error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.delete("/api/admin/invitations/:invitationId", async (req, res) => {
+    try {
+      const invitationId = parseInt(req.params.invitationId);
+      await storage.removeTeamInvitation(invitationId);
+      res.json({ success: true });
+    } catch (err) {
+      console.error("Remove team invitation error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
@@ -1433,6 +1882,91 @@ export async function registerRoutes(
     }
   });
 
+  app.patch("/api/admin/licenses/:licenseId", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const body = z.object({
+        tier: z.enum(["trial", "pro", "teams", "custom"]).optional(),
+        deviceLimit: z.number().int().min(1).max(100).optional(),
+        expiresAt: z.number().int().positive().optional(),
+        state: z.enum(["trial_active", "active", "grace", "expired", "revoked"]).optional(),
+        customQuota: z.number().int().min(0).max(10000).nullable().optional(),
+        extendTrialDays: z.number().int().min(1).max(365).optional(),
+        extendDuration: z.enum(["7d", "30d", "90d", "180d", "365d"]).optional(),
+      }).parse(req.body);
+
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+
+      const updates: {
+        tier?: string;
+        deviceLimit?: number;
+        expiresAt?: number;
+        state?: string;
+        customQuota?: number | null;
+        signature?: string;
+      } = {};
+
+      if (body.tier !== undefined) updates.tier = body.tier;
+      if (body.deviceLimit !== undefined) updates.deviceLimit = body.deviceLimit;
+      if (body.state !== undefined) updates.state = body.state;
+      if (body.customQuota !== undefined) updates.customQuota = body.customQuota;
+
+      if (body.expiresAt !== undefined) {
+        updates.expiresAt = body.expiresAt;
+      } else if (body.extendTrialDays !== undefined) {
+        const currentExpires = license.expiresAt;
+        const now = Math.floor(Date.now() / 1000);
+        updates.expiresAt = Math.max(currentExpires, now) + body.extendTrialDays * 86400;
+        if (license.state === "trial_active") {
+          updates.state = "trial_active";
+        }
+      } else if (body.extendDuration !== undefined) {
+        const daysMap: Record<string, number> = {
+          "7d": 7,
+          "30d": 30,
+          "90d": 90,
+          "180d": 180,
+          "365d": 365,
+        };
+        const days = daysMap[body.extendDuration] || 30;
+        const currentExpires = license.expiresAt;
+        const now = Math.floor(Date.now() / 1000);
+        updates.expiresAt = Math.max(currentExpires, now) + days * 86400;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        const payload = {
+          license_id: license.id,
+          account_id: license.accountId,
+          tier: updates.tier ?? license.tier,
+          device_limit: updates.deviceLimit ?? license.deviceLimit,
+          issued_at: license.issuedAt,
+          expires_at: updates.expiresAt ?? license.expiresAt,
+          state: updates.state ?? license.state,
+          features: { smart_workspaces: true, activity_feed: true },
+        };
+        updates.signature = signLicense(payload);
+        await storage.updateLicense(licenseId, updates);
+      }
+
+      res.json({ success: true, message: "License updated" });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({
+          message: err.errors[0].message,
+          field: err.errors[0].path.join("."),
+        });
+        return;
+      }
+      console.error("Modify license error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   app.get("/api/admin/licenses/:licenseId/hosts", async (req, res) => {
     try {
       const { licenseId } = req.params;
@@ -1540,12 +2074,22 @@ export async function registerRoutes(
         }
       } catch (_) {}
       let accountEmail: string | undefined;
+      let displayName: string | undefined;
       try {
         const account = await storage.getAccountById(license.accountId);
         if (account?.email) accountEmail = account.email;
-        // For device-only accounts (no email), synthesise a display identifier
         else accountEmail = "Device " + license.accountId.slice(0, 12);
+        const isDeviceOnly = !account?.email || account.email.startsWith("Device ") || account.id.startsWith("device_");
+        displayName = isDeviceOnly ? "Join" : (account?.username ? `Join ${account.username}` : (account?.email ? `Join ${account.email.split("@")[0]}` : "Join"));
       } catch (_) {}
+      const tier = (license.tier || "free").toLowerCase();
+      const canExtendTrial = hostUuid ? storage.canExtendDeviceTrial(hostUuid) : false;
+      const entitlements = resolveEntitlementsByState(
+        state,
+        tier,
+        license.expiresAt ? new Date(license.expiresAt * 1000).toISOString() : null,
+        canExtendTrial
+      );
       res.json({
         license: {
           state,
@@ -1562,6 +2106,8 @@ export async function registerRoutes(
         subscription: subscription ?? undefined,
         account_id: license.accountId,
         account_email: accountEmail,
+        display_name: displayName ?? "Join",
+        entitlements,
       });
     } catch (err) {
       console.error("Config error:", err);
@@ -1616,8 +2162,27 @@ export async function registerRoutes(
         if (lic?.planInterval) subscription!.plan_interval = lic.planInterval;
       }
       const members = license.tier === "teams" ? await storage.getLicenseMembers(license.id) : [];
+      const username = account?.username ?? null;
+      const isDeviceOnlyAccount = !account?.email || account.email.startsWith("Device ") || account.id.startsWith("device_");
+      const displayName = isDeviceOnlyAccount ? "Join" : (username ? `Join ${username}` : (account?.email ? `Join ${account.email.split("@")[0]}` : "Join"));
+
+      // Primary device: prefer hostUuid from query, else first device from license
+      let device: { deviceId: string; displayName: string; platform: string; lastSeen: string | null } | null = null;
+      const hostsForLicense = await storage.getHostsForLicense(license.id);
+      const primaryDeviceId = hostUuid || hostsForLicense[0]?.host_uuid;
+      if (primaryDeviceId) {
+        const host = await storage.getHostByUUID(primaryDeviceId);
+        device = {
+          deviceId: primaryDeviceId,
+          displayName,
+          platform: host?.platform || "unknown",
+          lastSeen: host?.lastSeenAt ?? null,
+        };
+      }
+
+      const accountEmail = account && !isDeviceOnlyAccount ? (account.email || null) : null;
       res.json({
-        account: account ? { id: account.id, email: account.email || null } : null,
+        account: account ? { id: account.id, email: accountEmail, username: isDeviceOnlyAccount ? null : username, isDeviceOnly: isDeviceOnlyAccount } : null,
         license: {
           id: license.id,
           tier: license.tier,
@@ -1628,9 +2193,95 @@ export async function registerRoutes(
           members: license.tier === "teams" ? { primary: account ? { accountId: account.id, email: account.email } : null, members } : undefined,
         },
         subscription: subscription ?? undefined,
+        device: device ?? undefined,
       });
     } catch (err) {
       console.error("Account summary error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ACCOUNT UPDATE PROFILE (username; password-authenticated) ===
+  app.options("/api/v1/account/update-profile", (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.sendStatus(204);
+  });
+  app.post("/api/v1/account/update-profile", authRateLimit, async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    try {
+      const body = z.object({
+        email: z.string().email(),
+        password: z.string().min(1),
+        username: z.string().max(64).optional(),
+      }).parse(req.body);
+      const account = await storage.getAccountByEmail(body.email);
+      if (!account) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      const passwordHash = storage.getPasswordHash(account.id);
+      if (!passwordHash) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      const ok = await bcrypt.compare(body.password, passwordHash);
+      if (!ok) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      await storage.updateAccountUsername(account.id, body.username ?? "");
+      res.json({ success: true, username: body.username?.trim() || null });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Update profile error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ACCOUNT CHANGE PASSWORD ===
+  app.options("/api/v1/account/change-password", (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.sendStatus(204);
+  });
+  app.post("/api/v1/account/change-password", authRateLimit, async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    try {
+      const body = z.object({
+        email: z.string().email(),
+        currentPassword: z.string().min(1),
+        newPassword: z.string().min(8, "Password must be at least 8 characters"),
+      }).parse(req.body);
+      const account = await storage.getAccountByEmail(body.email);
+      if (!account) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      const passwordHash = storage.getPasswordHash(account.id);
+      if (!passwordHash) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      const ok = await bcrypt.compare(body.currentPassword, passwordHash);
+      if (!ok) {
+        res.status(401).json({ message: "Invalid email or password" });
+        return;
+      }
+      const newHash = await bcrypt.hash(body.newPassword, 10);
+      await storage.updateAccountPassword(account.id, newHash);
+      res.json({ success: true });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Change password error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });

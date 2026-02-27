@@ -29,6 +29,7 @@ The path is resolved in [server/storage.ts](server/storage.ts) when the server s
 - **Open and inspect**: Use any SQLite client, e.g. [DB Browser for SQLite](https://sqlitebrowser.org/) or the `sqlite3` CLI. Open the file at `data/telemetry.db` (or your `JOINCLOUD_CONTROL_PLANE_DB_PATH`).
 - **Backup**: Copy the file (e.g. `cp data/telemetry.db data/telemetry.db.bak`). No special dump is required for SQLite; ensure the server is idle or stopped to avoid corruption.
 - **Reset**: To start fresh, stop the server, delete or rename `data/telemetry.db`, and restart; the schema will be recreated on first use.
+- **Full reset (Admin + App)**: Run `./scripts/reset-fresh-start.sh` (or `.bat` on Windows) from the project root when both apps are stopped. This deletes the admin DB and JoinCloud app data so both start completely fresh.
 
 ## Note on DATABASE_URL
 
