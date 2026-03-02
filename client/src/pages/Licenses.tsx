@@ -1,6 +1,8 @@
 import { useState, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Key, Ban, CalendarPlus, ChevronDown, ChevronRight, UserMinus, UserPlus, Settings, Share2, HardDrive, Users, Clock } from "lucide-react";
+import { Key, Ban, CalendarPlus, ChevronDown, ChevronRight, UserMinus, UserPlus, Settings, Share2, HardDrive, Users, Clock, ShieldAlert, ShieldCheck, FileText, Plus, UserCheck } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -64,6 +66,8 @@ interface License {
   graceEndsAt?: number | null;
   renewalAt?: number | null;
   customQuota?: number | null;
+  overridesJson?: string | null;
+  isDeviceOnly?: boolean;
 }
 
 export default function Licenses() {
@@ -90,11 +94,17 @@ export default function Licenses() {
   const [modifyLicense, setModifyLicense] = useState<License | null>(null);
   const [modifyForm, setModifyForm] = useState({
     tier: "pro" as "trial" | "pro" | "teams" | "custom",
+    state: "active" as "active" | "trial_active" | "suspended" | "revoked",
     deviceLimit: 5,
     shareLimit: 200,
+    userLimit: 1,
+    teamLimit: 0,
+    devicesPerUser: 5,
     teamEnabled: false,
     extendDuration: "none" as "none" | "7d" | "30d" | "90d" | "180d" | "365d",
     customDays: 30,
+    additionalDeviceIds: "",
+    notes: "",
   });
 
   const { data: licenses, isLoading, error } = useQuery<License[]>({
@@ -340,13 +350,30 @@ export default function Licenses() {
 
   const openModifyDialog = (license: License) => {
     setModifyLicense(license);
+    
+    // Parse overrides if available
+    let overrides: Record<string, any> = {};
+    if (license.overridesJson) {
+      try {
+        overrides = JSON.parse(license.overridesJson);
+      } catch (e) {
+        // ignore
+      }
+    }
+    
     setModifyForm({
       tier: license.tier as "trial" | "pro" | "teams" | "custom",
+      state: license.state as "active" | "trial_active" | "suspended" | "revoked",
       deviceLimit: license.deviceLimit,
-      shareLimit: license.customQuota ?? (license.tier === "pro" ? 200 : license.tier === "teams" ? 1000 : 10),
+      shareLimit: overrides.shareLimitMonthly ?? license.customQuota ?? (license.tier === "pro" ? 200 : license.tier === "teams" ? 1000 : 10),
+      userLimit: overrides.userLimit ?? (license.tier === "teams" ? 5 : 1),
+      teamLimit: overrides.teamLimit ?? (license.tier === "teams" ? 3 : 0),
+      devicesPerUser: overrides.devicesPerUser ?? 5,
       teamEnabled: license.tier === "teams" || license.tier === "custom",
       extendDuration: "none",
       customDays: 30,
+      additionalDeviceIds: overrides.additionalDeviceIds?.join(", ") ?? "",
+      notes: overrides.notes ?? "",
     });
   };
 
@@ -354,28 +381,46 @@ export default function Licenses() {
     if (!modifyLicense) return;
     const updates: {
       tier?: string;
+      state?: string;
       deviceLimit?: number;
       customQuota?: number;
       extendDuration?: string;
       extendTrialDays?: number;
+      shareLimitMonthly?: number;
+      userLimit?: number;
+      teamLimit?: number;
+      devicesPerUser?: number;
+      additionalDeviceIds?: string[];
+      notes?: string;
     } = {};
 
     if (modifyForm.tier !== modifyLicense.tier) {
       updates.tier = modifyForm.tier;
     }
+    if (modifyForm.state !== modifyLicense.state) {
+      updates.state = modifyForm.state;
+    }
     if (modifyForm.deviceLimit !== modifyLicense.deviceLimit) {
       updates.deviceLimit = modifyForm.deviceLimit;
     }
-    if (modifyForm.shareLimit !== (modifyLicense.customQuota ?? 0)) {
-      updates.customQuota = modifyForm.shareLimit;
+    
+    // Always send quota fields so they can be stored in overrides_json
+    updates.shareLimitMonthly = modifyForm.shareLimit;
+    updates.userLimit = modifyForm.userLimit;
+    updates.teamLimit = modifyForm.teamLimit;
+    updates.devicesPerUser = modifyForm.devicesPerUser;
+    updates.notes = modifyForm.notes;
+    
+    // Parse additional device IDs
+    if (modifyForm.additionalDeviceIds.trim()) {
+      updates.additionalDeviceIds = modifyForm.additionalDeviceIds
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
     }
+    
     if (modifyForm.extendDuration && modifyForm.extendDuration !== "none") {
       updates.extendDuration = modifyForm.extendDuration;
-    }
-
-    if (Object.keys(updates).length === 0) {
-      toast({ title: "No changes to save" });
-      return;
     }
 
     modifyMutation.mutate({ licenseId: modifyLicense.id, updates });
@@ -880,7 +925,34 @@ export default function Licenses() {
           </DialogHeader>
 
           {modifyLicense && (
-            <div className="space-y-6 py-4">
+            <div className="space-y-5 py-4 max-h-[60vh] overflow-y-auto pr-2">
+              {/* License State */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  {modifyForm.state === "suspended" ? <ShieldAlert className="w-4 h-4 text-red-500" /> : <ShieldCheck className="w-4 h-4" />}
+                  License State
+                </Label>
+                <Select
+                  value={modifyForm.state}
+                  onValueChange={(v) => setModifyForm((f) => ({ ...f, state: v as typeof f.state }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="trial_active">Trial Active</SelectItem>
+                    <SelectItem value="suspended">Suspended</SelectItem>
+                    <SelectItem value="revoked">Revoked</SelectItem>
+                  </SelectContent>
+                </Select>
+                {modifyForm.state === "suspended" && (
+                  <p className="text-xs text-yellow-500">
+                    Suspending will block all devices linked to this license.
+                  </p>
+                )}
+              </div>
+
               {/* Plan Tier */}
               <div className="space-y-2">
                 <Label className="flex items-center gap-2">
@@ -895,7 +967,7 @@ export default function Licenses() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {modifyLicense.state === "trial_active" && (
+                    {(modifyLicense.state === "trial_active" || modifyForm.tier === "trial") && (
                       <SelectItem value="trial">Trial</SelectItem>
                     )}
                     <SelectItem value="pro">Pro</SelectItem>
@@ -905,57 +977,123 @@ export default function Licenses() {
                 </Select>
               </div>
 
-              {/* Device Limit */}
-              <div className="space-y-2">
-                <Label className="flex items-center gap-2">
-                  <HardDrive className="w-4 h-4" />
-                  Device Limit
-                </Label>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={modifyForm.deviceLimit}
-                  onChange={(e) => setModifyForm((f) => ({ ...f, deviceLimit: parseInt(e.target.value, 10) || 1 }))}
-                  className="w-full rounded border bg-background px-3 py-2 text-sm"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Current usage: {modifyLicense.hostCount} / {modifyLicense.deviceLimit}
-                </p>
-              </div>
-
-              {/* Share Limit */}
-              <div className="space-y-2">
-                <Label className="flex items-center gap-2">
-                  <Share2 className="w-4 h-4" />
-                  Monthly Share Limit
-                </Label>
-                <input
-                  type="number"
-                  min={0}
-                  max={10000}
-                  value={modifyForm.shareLimit}
-                  onChange={(e) => setModifyForm((f) => ({ ...f, shareLimit: parseInt(e.target.value, 10) || 0 }))}
-                  className="w-full rounded border bg-background px-3 py-2 text-sm"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Set to 0 for unlimited shares
-                </p>
-              </div>
-
-              {/* Team Creation */}
-              {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
-                <div className="flex items-center justify-between">
+              <div className="grid grid-cols-2 gap-4">
+                {/* Device Limit */}
+                <div className="space-y-2">
                   <Label className="flex items-center gap-2">
-                    <Users className="w-4 h-4" />
-                    Team Creation Enabled
+                    <HardDrive className="w-4 h-4" />
+                    Device Limit
                   </Label>
-                  <Switch
-                    checked={modifyForm.teamEnabled}
-                    onCheckedChange={(checked) => setModifyForm((f) => ({ ...f, teamEnabled: checked }))}
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={modifyForm.deviceLimit}
+                    onChange={(e) => setModifyForm((f) => ({ ...f, deviceLimit: parseInt(e.target.value, 10) || 1 }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Usage: {modifyLicense.hostCount} / {modifyLicense.deviceLimit}
+                  </p>
+                </div>
+
+                {/* Devices Per User */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4" />
+                    Devices/User
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={modifyForm.devicesPerUser}
+                    onChange={(e) => setModifyForm((f) => ({ ...f, devicesPerUser: parseInt(e.target.value, 10) || 1 }))}
                   />
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                {/* Share Limit */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <Share2 className="w-4 h-4" />
+                    Monthly Shares
+                  </Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100000}
+                    value={modifyForm.shareLimit}
+                    onChange={(e) => setModifyForm((f) => ({ ...f, shareLimit: parseInt(e.target.value, 10) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0 = unlimited
+                  </p>
+                </div>
+
+                {/* User Limit (for teams) */}
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    <UserCheck className="w-4 h-4" />
+                    User Limit
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={modifyForm.userLimit}
+                    onChange={(e) => setModifyForm((f) => ({ ...f, userLimit: parseInt(e.target.value, 10) || 1 }))}
+                  />
+                </div>
+              </div>
+
+              {/* Team Limit */}
+              {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="flex items-center gap-2">
+                      <Users className="w-4 h-4" />
+                      Team Spaces
+                    </Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={50}
+                      value={modifyForm.teamLimit}
+                      onChange={(e) => setModifyForm((f) => ({ ...f, teamLimit: parseInt(e.target.value, 10) || 0 }))}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Max team workspaces
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-between pt-6">
+                    <Label className="flex items-center gap-2">
+                      <Users className="w-4 h-4" />
+                      Team Enabled
+                    </Label>
+                    <Switch
+                      checked={modifyForm.teamEnabled}
+                      onCheckedChange={(checked) => setModifyForm((f) => ({ ...f, teamEnabled: checked }))}
+                    />
+                  </div>
+                </div>
               )}
+
+              {/* Additional Device IDs */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <Plus className="w-4 h-4" />
+                  Additional Device IDs
+                </Label>
+                <Input
+                  value={modifyForm.additionalDeviceIds}
+                  onChange={(e) => setModifyForm((f) => ({ ...f, additionalDeviceIds: e.target.value }))}
+                  placeholder="uuid-1, uuid-2, uuid-3"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated list of extra allowed device UUIDs
+                </p>
+              </div>
 
               {/* Extend Duration */}
               <div className="space-y-2">
@@ -982,6 +1120,20 @@ export default function Licenses() {
                 <p className="text-xs text-muted-foreground">
                   Current expiry: {formatDate(modifyLicense.expiresAt)}
                 </p>
+              </div>
+
+              {/* Notes */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2">
+                  <FileText className="w-4 h-4" />
+                  Admin Notes
+                </Label>
+                <Textarea
+                  value={modifyForm.notes}
+                  onChange={(e) => setModifyForm((f) => ({ ...f, notes: e.target.value }))}
+                  placeholder="Internal notes about this license..."
+                  rows={2}
+                />
               </div>
             </div>
           )}

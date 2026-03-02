@@ -299,6 +299,111 @@ db.exec(`
   );
 `);
 
+// === NEW TABLES FOR LICENSE ACCOUNT MANAGEMENT SYSTEM ===
+
+// Subscriptions table - tracks payment subscriptions separately from licenses
+db.exec(`
+  CREATE TABLE IF NOT EXISTS subscriptions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    license_id TEXT,
+    provider TEXT NOT NULL,
+    provider_subscription_id TEXT,
+    plan TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    amount INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'INR',
+    interval TEXT NOT NULL DEFAULT 'month',
+    current_period_start INTEGER,
+    current_period_end INTEGER,
+    payment_due_date INTEGER,
+    grace_ends_at INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    FOREIGN KEY (license_id) REFERENCES licenses(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_subscriptions_account ON subscriptions(account_id);
+  CREATE INDEX IF NOT EXISTS idx_subscriptions_license ON subscriptions(license_id);
+  CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+`);
+
+// Payments table - tracks individual payment transactions
+db.exec(`
+  CREATE TABLE IF NOT EXISTS payments (
+    id TEXT PRIMARY KEY,
+    subscription_id TEXT,
+    account_id TEXT NOT NULL,
+    device_id TEXT,
+    provider TEXT NOT NULL,
+    provider_payment_id TEXT,
+    amount INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'INR',
+    status TEXT NOT NULL DEFAULT 'pending',
+    invoice_url TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_payments_account ON payments(account_id);
+  CREATE INDEX IF NOT EXISTS idx_payments_subscription ON payments(subscription_id);
+  CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
+`);
+
+// Device recovery requests - for device ID mismatch recovery
+db.exec(`
+  CREATE TABLE IF NOT EXISTS device_recovery_requests (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    old_device_id TEXT NOT NULL,
+    new_device_id TEXT NOT NULL,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_notes TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_recovery_account ON device_recovery_requests(account_id);
+  CREATE INDEX IF NOT EXISTS idx_recovery_status ON device_recovery_requests(status);
+`);
+
+// Referrals table - tracks referral relationships
+db.exec(`
+  CREATE TABLE IF NOT EXISTS referrals (
+    id TEXT PRIMARY KEY,
+    referrer_account_id TEXT NOT NULL,
+    referred_account_id TEXT NOT NULL,
+    referral_code TEXT NOT NULL,
+    days_granted INTEGER NOT NULL DEFAULT 10,
+    status TEXT NOT NULL DEFAULT 'completed',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (referrer_account_id) REFERENCES accounts(id),
+    FOREIGN KEY (referred_account_id) REFERENCES accounts(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_account_id);
+  CREATE INDEX IF NOT EXISTS idx_referrals_referred ON referrals(referred_account_id);
+`);
+
+// Add new columns to hosts table for suspension
+try { db.exec(`ALTER TABLE hosts ADD COLUMN suspended INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE hosts ADD COLUMN suspension_reason TEXT`); } catch (e) { /* exists */ }
+
+// Add new columns to accounts table for referrals and device tracking
+try { db.exec(`ALTER TABLE accounts ADD COLUMN referral_code TEXT UNIQUE`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE accounts ADD COLUMN referred_by TEXT`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE accounts ADD COLUMN referral_count INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE accounts ADD COLUMN referral_days_earned INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE accounts ADD COLUMN device_change_count INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+try { db.exec(`ALTER TABLE accounts ADD COLUMN last_device_change_at TEXT`); } catch (e) { /* exists */ }
+
+// Add account_id as nullable to licenses (for device-only licenses without account)
+try { db.exec(`ALTER TABLE licenses ADD COLUMN is_device_only INTEGER DEFAULT 0`); } catch (e) { /* exists */ }
+
+// Create index for referral codes
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_accounts_referral_code ON accounts(referral_code)`); } catch (e) { /* exists */ }
+
 // Teams: license_members (migration for existing DBs)
 try {
   db.exec(`
@@ -378,6 +483,14 @@ export interface Account {
   graceEndsAt?: string | null;
   razorpayCustomerId?: string | null;
   razorpaySubscriptionId?: string | null;
+  // Referral fields
+  referralCode?: string | null;
+  referredBy?: string | null;
+  referralCount?: number;
+  referralDaysEarned?: number;
+  // Device tracking
+  deviceChangeCount?: number;
+  lastDeviceChangeAt?: string | null;
 }
 
 export interface License {
@@ -411,6 +524,130 @@ export interface TeamInvitation {
   invitedBy: string;
   invitedAt: string;
   status: string;
+}
+
+// === NEW TYPES FOR LICENSE ACCOUNT MANAGEMENT SYSTEM ===
+
+export interface Subscription {
+  id: string;
+  accountId: string;
+  licenseId: string | null;
+  provider: string;
+  providerSubscriptionId: string | null;
+  plan: string;
+  status: string;
+  amount: number;
+  currency: string;
+  interval: string;
+  currentPeriodStart: number | null;
+  currentPeriodEnd: number | null;
+  paymentDueDate: number | null;
+  graceEndsAt: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Payment {
+  id: string;
+  subscriptionId: string | null;
+  accountId: string;
+  deviceId: string | null;
+  provider: string;
+  providerPaymentId: string | null;
+  amount: number;
+  currency: string;
+  status: string;
+  invoiceUrl: string | null;
+  createdAt: string;
+}
+
+export interface DeviceRecoveryRequest {
+  id: string;
+  accountId: string;
+  oldDeviceId: string;
+  newDeviceId: string;
+  reason: string | null;
+  status: string;
+  adminNotes: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+export interface Referral {
+  id: string;
+  referrerAccountId: string;
+  referredAccountId: string;
+  referralCode: string;
+  daysGranted: number;
+  status: string;
+  createdAt: string;
+}
+
+export interface ReferralStats {
+  referralCode: string;
+  referralLink: string;
+  totalReferrals: number;
+  daysEarned: number;
+  referrals: Array<{
+    email: string;
+    date: number;
+    daysGranted: number;
+  }>;
+}
+
+export interface LicenseCheckResponse {
+  deviceId: string;
+  license: {
+    id: string | null;
+    tier: string;
+    state: string;
+    expiresAt: number | null;
+    daysRemaining: number | null;
+    graceEndsAt: number | null;
+    graceDaysRemaining: number | null;
+  };
+  account: {
+    linked: boolean;
+    email: string | null;
+    hasPaymentMethod: boolean;
+  };
+  subscription: {
+    active: boolean;
+    status: string | null;
+    renewalDate: number | null;
+    paymentDueDate: number | null;
+  } | null;
+  ui: {
+    primaryButton: {
+      label: string;
+      action: string;
+      url: string;
+    };
+    secondaryButton: {
+      label: string;
+      action: string;
+      url: string;
+    } | null;
+    showSignOut: boolean;
+    bannerText: string;
+    bannerStyle: string;
+    isBlocked: boolean;
+    blockingMessage: string | null;
+  };
+}
+
+export interface SubscriptionStats {
+  totalMonthlyRevenue: number;
+  totalYearlyRevenue: number;
+  mrr: number;
+  arr: number;
+  activeSubscriptions: number;
+  trialUsers: number;
+  churnRate: number;
+  byCountry: Array<{ country: string; count: number; revenue: number }>;
+  byPlan: Array<{ plan: string; count: number; revenue: number }>;
+  byDevice: Array<{ platform: string; count: number }>;
 }
 
 export interface BillingSummary {
@@ -521,6 +758,57 @@ export interface IStorage {
   // Monthly share usage
   getMonthlyShareCount(deviceId: string, ym: string): number;
   incrementMonthlyShares(deviceId: string, ym: string): Promise<{ count: number }>;
+  
+  // === NEW METHODS FOR LICENSE ACCOUNT MANAGEMENT SYSTEM ===
+  
+  // Subscriptions
+  createSubscription(subscription: Omit<Subscription, 'createdAt' | 'updatedAt'>): Promise<Subscription>;
+  getSubscriptionById(subscriptionId: string): Promise<Subscription | null>;
+  getSubscriptionByAccountId(accountId: string): Promise<Subscription | null>;
+  getSubscriptionByLicenseId(licenseId: string): Promise<Subscription | null>;
+  updateSubscription(subscriptionId: string, updates: Partial<Subscription>): Promise<void>;
+  listSubscriptions(filters?: { status?: string; provider?: string }): Promise<Subscription[]>;
+  
+  // Payments
+  createPayment(payment: Omit<Payment, 'createdAt'>): Promise<Payment>;
+  getPaymentById(paymentId: string): Promise<Payment | null>;
+  getPaymentsByAccountId(accountId: string): Promise<Payment[]>;
+  getPaymentsBySubscriptionId(subscriptionId: string): Promise<Payment[]>;
+  updatePaymentStatus(paymentId: string, status: string): Promise<void>;
+  
+  // Device Recovery
+  createDeviceRecoveryRequest(request: Omit<DeviceRecoveryRequest, 'createdAt' | 'resolvedAt' | 'resolvedBy'>): Promise<DeviceRecoveryRequest>;
+  getDeviceRecoveryRequestById(requestId: string): Promise<DeviceRecoveryRequest | null>;
+  getPendingRecoveryRequests(): Promise<DeviceRecoveryRequest[]>;
+  getRecoveryRequestsByAccountId(accountId: string): Promise<DeviceRecoveryRequest[]>;
+  resolveDeviceRecoveryRequest(requestId: string, status: 'approved' | 'rejected', adminNotes: string, resolvedBy: string): Promise<void>;
+  
+  // Referrals
+  createReferral(referral: Omit<Referral, 'createdAt'>): Promise<Referral>;
+  getReferralsByReferrerId(referrerAccountId: string): Promise<Referral[]>;
+  getReferralByReferredId(referredAccountId: string): Promise<Referral | null>;
+  getAccountByReferralCode(referralCode: string): Promise<Account | null>;
+  updateAccountReferral(accountId: string, updates: { referralCode?: string; referredBy?: string; referralCount?: number; referralDaysEarned?: number }): Promise<void>;
+  getReferralStats(accountId: string): Promise<ReferralStats>;
+  
+  // License check for desktop app
+  getLicenseCheckResponse(deviceId: string): Promise<LicenseCheckResponse>;
+  
+  // Device-only license (no account required)
+  createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License>;
+  getLicenseByDeviceId(deviceId: string): Promise<License | null>;
+  linkLicenseToAccount(licenseId: string, accountId: string): Promise<void>;
+  
+  // Suspension
+  suspendHost(hostUuid: string, reason: string): Promise<void>;
+  unsuspendHost(hostUuid: string): Promise<void>;
+  isHostSuspended(hostUuid: string): boolean;
+  
+  // Account device tracking
+  incrementDeviceChangeCount(accountId: string): Promise<number>;
+  
+  // Subscription stats
+  getSubscriptionStats(): Promise<SubscriptionStats>;
 }
 
 export class SqliteStorage implements IStorage {
@@ -1432,6 +1720,14 @@ export class SqliteStorage implements IStorage {
       graceEndsAt: row.grace_ends_at ?? null,
       razorpayCustomerId: row.razorpay_customer_id ?? null,
       razorpaySubscriptionId: row.razorpay_subscription_id ?? null,
+      // Referral fields
+      referralCode: row.referral_code ?? null,
+      referredBy: row.referred_by ?? null,
+      referralCount: Number(row.referral_count ?? 0),
+      referralDaysEarned: Number(row.referral_days_earned ?? 0),
+      // Device tracking
+      deviceChangeCount: Number(row.device_change_count ?? 0),
+      lastDeviceChangeAt: row.last_device_change_at ?? null,
     };
   }
 
@@ -2046,6 +2342,629 @@ export class SqliteStorage implements IStorage {
     values.push(licenseId);
     
     db.prepare(`UPDATE licenses SET ${parts.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  // === NEW METHODS FOR LICENSE ACCOUNT MANAGEMENT SYSTEM ===
+
+  // Helper to generate referral code
+  private generateReferralCode(email: string): string {
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256').update(email + Date.now()).digest('hex');
+    return 'JC-' + hash.substring(0, 5).toUpperCase();
+  }
+
+  // Helper to map subscription row
+  private mapSubscriptionRow(row: any): Subscription {
+    return {
+      id: row.id,
+      accountId: row.account_id,
+      licenseId: row.license_id ?? null,
+      provider: row.provider,
+      providerSubscriptionId: row.provider_subscription_id ?? null,
+      plan: row.plan,
+      status: row.status,
+      amount: Number(row.amount ?? 0),
+      currency: row.currency ?? 'INR',
+      interval: row.interval ?? 'month',
+      currentPeriodStart: row.current_period_start ? Number(row.current_period_start) : null,
+      currentPeriodEnd: row.current_period_end ? Number(row.current_period_end) : null,
+      paymentDueDate: row.payment_due_date ? Number(row.payment_due_date) : null,
+      graceEndsAt: row.grace_ends_at ? Number(row.grace_ends_at) : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // Helper to map payment row
+  private mapPaymentRow(row: any): Payment {
+    return {
+      id: row.id,
+      subscriptionId: row.subscription_id ?? null,
+      accountId: row.account_id,
+      deviceId: row.device_id ?? null,
+      provider: row.provider,
+      providerPaymentId: row.provider_payment_id ?? null,
+      amount: Number(row.amount ?? 0),
+      currency: row.currency ?? 'INR',
+      status: row.status,
+      invoiceUrl: row.invoice_url ?? null,
+      createdAt: row.created_at,
+    };
+  }
+
+  // Helper to map recovery request row
+  private mapRecoveryRequestRow(row: any): DeviceRecoveryRequest {
+    return {
+      id: row.id,
+      accountId: row.account_id,
+      oldDeviceId: row.old_device_id,
+      newDeviceId: row.new_device_id,
+      reason: row.reason ?? null,
+      status: row.status,
+      adminNotes: row.admin_notes ?? null,
+      createdAt: row.created_at,
+      resolvedAt: row.resolved_at ?? null,
+      resolvedBy: row.resolved_by ?? null,
+    };
+  }
+
+  // Helper to map referral row
+  private mapReferralRow(row: any): Referral {
+    return {
+      id: row.id,
+      referrerAccountId: row.referrer_account_id,
+      referredAccountId: row.referred_account_id,
+      referralCode: row.referral_code,
+      daysGranted: Number(row.days_granted ?? 10),
+      status: row.status,
+      createdAt: row.created_at,
+    };
+  }
+
+  // === SUBSCRIPTIONS ===
+
+  async createSubscription(subscription: Omit<Subscription, 'createdAt' | 'updatedAt'>): Promise<Subscription> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO subscriptions (id, account_id, license_id, provider, provider_subscription_id, plan, status, amount, currency, interval, current_period_start, current_period_end, payment_due_date, grace_ends_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      subscription.id,
+      subscription.accountId,
+      subscription.licenseId,
+      subscription.provider,
+      subscription.providerSubscriptionId,
+      subscription.plan,
+      subscription.status,
+      subscription.amount,
+      subscription.currency,
+      subscription.interval,
+      subscription.currentPeriodStart,
+      subscription.currentPeriodEnd,
+      subscription.paymentDueDate,
+      subscription.graceEndsAt,
+      now,
+      now
+    );
+    const row = db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(subscription.id) as any;
+    return this.mapSubscriptionRow(row);
+  }
+
+  async getSubscriptionById(subscriptionId: string): Promise<Subscription | null> {
+    const row = db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(subscriptionId) as any;
+    if (!row) return null;
+    return this.mapSubscriptionRow(row);
+  }
+
+  async getSubscriptionByAccountId(accountId: string): Promise<Subscription | null> {
+    const row = db.prepare('SELECT * FROM subscriptions WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').get(accountId) as any;
+    if (!row) return null;
+    return this.mapSubscriptionRow(row);
+  }
+
+  async getSubscriptionByLicenseId(licenseId: string): Promise<Subscription | null> {
+    const row = db.prepare('SELECT * FROM subscriptions WHERE license_id = ? ORDER BY created_at DESC LIMIT 1').get(licenseId) as any;
+    if (!row) return null;
+    return this.mapSubscriptionRow(row);
+  }
+
+  async updateSubscription(subscriptionId: string, updates: Partial<Subscription>): Promise<void> {
+    const now = new Date().toISOString();
+    const parts: string[] = ['updated_at = ?'];
+    const values: any[] = [now];
+    
+    if (updates.status !== undefined) { parts.push('status = ?'); values.push(updates.status); }
+    if (updates.currentPeriodStart !== undefined) { parts.push('current_period_start = ?'); values.push(updates.currentPeriodStart); }
+    if (updates.currentPeriodEnd !== undefined) { parts.push('current_period_end = ?'); values.push(updates.currentPeriodEnd); }
+    if (updates.paymentDueDate !== undefined) { parts.push('payment_due_date = ?'); values.push(updates.paymentDueDate); }
+    if (updates.graceEndsAt !== undefined) { parts.push('grace_ends_at = ?'); values.push(updates.graceEndsAt); }
+    if (updates.amount !== undefined) { parts.push('amount = ?'); values.push(updates.amount); }
+    if (updates.plan !== undefined) { parts.push('plan = ?'); values.push(updates.plan); }
+    
+    values.push(subscriptionId);
+    db.prepare(`UPDATE subscriptions SET ${parts.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  async listSubscriptions(filters?: { status?: string; provider?: string }): Promise<Subscription[]> {
+    const conditions: string[] = [];
+    const params: any[] = [];
+    
+    if (filters?.status) {
+      conditions.push('status = ?');
+      params.push(filters.status);
+    }
+    if (filters?.provider) {
+      conditions.push('provider = ?');
+      params.push(filters.provider);
+    }
+    
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = db.prepare(`SELECT * FROM subscriptions ${whereClause} ORDER BY created_at DESC`).all(...params) as any[];
+    return rows.map(r => this.mapSubscriptionRow(r));
+  }
+
+  // === PAYMENTS ===
+
+  async createPayment(payment: Omit<Payment, 'createdAt'>): Promise<Payment> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO payments (id, subscription_id, account_id, device_id, provider, provider_payment_id, amount, currency, status, invoice_url, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      payment.id,
+      payment.subscriptionId,
+      payment.accountId,
+      payment.deviceId,
+      payment.provider,
+      payment.providerPaymentId,
+      payment.amount,
+      payment.currency,
+      payment.status,
+      payment.invoiceUrl,
+      now
+    );
+    const row = db.prepare('SELECT * FROM payments WHERE id = ?').get(payment.id) as any;
+    return this.mapPaymentRow(row);
+  }
+
+  async getPaymentById(paymentId: string): Promise<Payment | null> {
+    const row = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as any;
+    if (!row) return null;
+    return this.mapPaymentRow(row);
+  }
+
+  async getPaymentsByAccountId(accountId: string): Promise<Payment[]> {
+    const rows = db.prepare('SELECT * FROM payments WHERE account_id = ? ORDER BY created_at DESC').all(accountId) as any[];
+    return rows.map(r => this.mapPaymentRow(r));
+  }
+
+  async getPaymentsBySubscriptionId(subscriptionId: string): Promise<Payment[]> {
+    const rows = db.prepare('SELECT * FROM payments WHERE subscription_id = ? ORDER BY created_at DESC').all(subscriptionId) as any[];
+    return rows.map(r => this.mapPaymentRow(r));
+  }
+
+  async updatePaymentStatus(paymentId: string, status: string): Promise<void> {
+    db.prepare('UPDATE payments SET status = ? WHERE id = ?').run(status, paymentId);
+  }
+
+  // === DEVICE RECOVERY ===
+
+  async createDeviceRecoveryRequest(request: Omit<DeviceRecoveryRequest, 'createdAt' | 'resolvedAt' | 'resolvedBy'>): Promise<DeviceRecoveryRequest> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO device_recovery_requests (id, account_id, old_device_id, new_device_id, reason, status, admin_notes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      request.id,
+      request.accountId,
+      request.oldDeviceId,
+      request.newDeviceId,
+      request.reason,
+      request.status,
+      request.adminNotes,
+      now
+    );
+    const row = db.prepare('SELECT * FROM device_recovery_requests WHERE id = ?').get(request.id) as any;
+    return this.mapRecoveryRequestRow(row);
+  }
+
+  async getDeviceRecoveryRequestById(requestId: string): Promise<DeviceRecoveryRequest | null> {
+    const row = db.prepare('SELECT * FROM device_recovery_requests WHERE id = ?').get(requestId) as any;
+    if (!row) return null;
+    return this.mapRecoveryRequestRow(row);
+  }
+
+  async getPendingRecoveryRequests(): Promise<DeviceRecoveryRequest[]> {
+    const rows = db.prepare("SELECT * FROM device_recovery_requests WHERE status = 'pending' ORDER BY created_at DESC").all() as any[];
+    return rows.map(r => this.mapRecoveryRequestRow(r));
+  }
+
+  async getRecoveryRequestsByAccountId(accountId: string): Promise<DeviceRecoveryRequest[]> {
+    const rows = db.prepare('SELECT * FROM device_recovery_requests WHERE account_id = ? ORDER BY created_at DESC').all(accountId) as any[];
+    return rows.map(r => this.mapRecoveryRequestRow(r));
+  }
+
+  async resolveDeviceRecoveryRequest(requestId: string, status: 'approved' | 'rejected', adminNotes: string, resolvedBy: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE device_recovery_requests 
+      SET status = ?, admin_notes = ?, resolved_at = ?, resolved_by = ?
+      WHERE id = ?
+    `).run(status, adminNotes, now, resolvedBy, requestId);
+    
+    // If approved, transfer the license to the new device
+    if (status === 'approved') {
+      const request = await this.getDeviceRecoveryRequestById(requestId);
+      if (request) {
+        // Find license for old device and update to new device
+        const oldLicense = await this.getLicenseForHost(request.oldDeviceId);
+        if (oldLicense) {
+          await this.removeLicenseHost(oldLicense.id, request.oldDeviceId);
+          await this.addLicenseHost(oldLicense.id, request.newDeviceId);
+        }
+      }
+    }
+  }
+
+  // === REFERRALS ===
+
+  async createReferral(referral: Omit<Referral, 'createdAt'>): Promise<Referral> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO referrals (id, referrer_account_id, referred_account_id, referral_code, days_granted, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      referral.id,
+      referral.referrerAccountId,
+      referral.referredAccountId,
+      referral.referralCode,
+      referral.daysGranted,
+      referral.status,
+      now
+    );
+    const row = db.prepare('SELECT * FROM referrals WHERE id = ?').get(referral.id) as any;
+    return this.mapReferralRow(row);
+  }
+
+  async getReferralsByReferrerId(referrerAccountId: string): Promise<Referral[]> {
+    const rows = db.prepare('SELECT * FROM referrals WHERE referrer_account_id = ? ORDER BY created_at DESC').all(referrerAccountId) as any[];
+    return rows.map(r => this.mapReferralRow(r));
+  }
+
+  async getReferralByReferredId(referredAccountId: string): Promise<Referral | null> {
+    const row = db.prepare('SELECT * FROM referrals WHERE referred_account_id = ?').get(referredAccountId) as any;
+    if (!row) return null;
+    return this.mapReferralRow(row);
+  }
+
+  async getAccountByReferralCode(referralCode: string): Promise<Account | null> {
+    const row = db.prepare('SELECT * FROM accounts WHERE referral_code = ?').get(referralCode) as any;
+    if (!row) return null;
+    return this.mapAccountRow(row);
+  }
+
+  async updateAccountReferral(accountId: string, updates: { referralCode?: string; referredBy?: string; referralCount?: number; referralDaysEarned?: number }): Promise<void> {
+    const now = new Date().toISOString();
+    const parts: string[] = ['updated_at = ?'];
+    const values: any[] = [now];
+    
+    if (updates.referralCode !== undefined) { parts.push('referral_code = ?'); values.push(updates.referralCode); }
+    if (updates.referredBy !== undefined) { parts.push('referred_by = ?'); values.push(updates.referredBy); }
+    if (updates.referralCount !== undefined) { parts.push('referral_count = ?'); values.push(updates.referralCount); }
+    if (updates.referralDaysEarned !== undefined) { parts.push('referral_days_earned = ?'); values.push(updates.referralDaysEarned); }
+    
+    values.push(accountId);
+    db.prepare(`UPDATE accounts SET ${parts.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  async getReferralStats(accountId: string): Promise<ReferralStats> {
+    const account = await this.getAccountById(accountId);
+    if (!account) {
+      return {
+        referralCode: '',
+        referralLink: '',
+        totalReferrals: 0,
+        daysEarned: 0,
+        referrals: [],
+      };
+    }
+    
+    const referrals = await this.getReferralsByReferrerId(accountId);
+    const referralDetails: Array<{ email: string; date: number; daysGranted: number }> = [];
+    
+    for (const ref of referrals) {
+      const referredAccount = await this.getAccountById(ref.referredAccountId);
+      if (referredAccount) {
+        // Mask email for privacy
+        const emailParts = referredAccount.email.split('@');
+        const maskedEmail = emailParts[0].substring(0, 2) + '***@' + emailParts[1];
+        referralDetails.push({
+          email: maskedEmail,
+          date: Math.floor(new Date(ref.createdAt).getTime() / 1000),
+          daysGranted: ref.daysGranted,
+        });
+      }
+    }
+    
+    return {
+      referralCode: account.referralCode || '',
+      referralLink: account.referralCode ? `https://joincloud.in/r/${account.referralCode}` : '',
+      totalReferrals: account.referralCount || 0,
+      daysEarned: account.referralDaysEarned || 0,
+      referrals: referralDetails,
+    };
+  }
+
+  // === LICENSE CHECK FOR DESKTOP APP ===
+
+  async getLicenseCheckResponse(deviceId: string): Promise<LicenseCheckResponse> {
+    const webUrl = process.env.JOINCLOUD_WEB_URL || 'https://dashboard.joincloud.in';
+    const now = Math.floor(Date.now() / 1000);
+    
+    // Check if host is suspended
+    const host = await this.getHostByUUID(deviceId);
+    const isSuspended = host && (db.prepare('SELECT suspended FROM hosts WHERE host_uuid = ?').get(deviceId) as any)?.suspended === 1;
+    
+    // Get license for this device
+    const license = await this.getLicenseForHost(deviceId);
+    
+    // Get account if license exists
+    let account: Account | null = null;
+    let subscription: Subscription | null = null;
+    
+    if (license && license.accountId && !license.accountId.includes('@device.local')) {
+      account = await this.getAccountById(license.accountId);
+      subscription = await this.getSubscriptionByAccountId(license.accountId);
+    }
+    
+    // Calculate days remaining
+    const daysRemaining = license ? Math.max(0, Math.ceil((license.expiresAt - now) / (24 * 60 * 60))) : null;
+    const graceDaysRemaining = license?.graceEndsAt ? Math.max(0, Math.ceil((license.graceEndsAt - now) / (24 * 60 * 60))) : null;
+    
+    // Determine license state
+    let state = 'expired';
+    if (license) {
+      if (license.state === 'revoked') {
+        state = 'revoked';
+      } else if (isSuspended) {
+        state = 'suspended';
+      } else if (license.expiresAt > now) {
+        state = license.state;
+      } else if (license.graceEndsAt && license.graceEndsAt > now) {
+        state = 'grace';
+      } else {
+        state = 'expired';
+      }
+    }
+    
+    // Determine UI state
+    const hasAccount = !!account && !account.email.includes('@device.local');
+    const isBlocked = state === 'expired' || state === 'suspended' || state === 'revoked';
+    
+    // Determine buttons and banner based on state
+    let primaryButton = { label: 'Sign In', action: 'sign_in', url: `${webUrl}/auth/login?deviceId=${deviceId}` };
+    let secondaryButton: { label: string; action: string; url: string } | null = null;
+    let bannerText = 'Welcome to JoinCloud';
+    let bannerStyle = 'info';
+    let blockingMessage: string | null = null;
+    
+    if (state === 'trial_active') {
+      if (hasAccount) {
+        primaryButton = { label: 'Dashboard', action: 'dashboard', url: `${webUrl}/dashboard` };
+        secondaryButton = { label: 'Upgrade', action: 'upgrade', url: `${webUrl}/pricing` };
+      }
+      bannerText = `Trial: ${daysRemaining} days remaining`;
+    } else if (state === 'active') {
+      primaryButton = { label: 'Dashboard', action: 'dashboard', url: `${webUrl}/dashboard` };
+      bannerText = `${license?.tier?.toUpperCase() || 'PRO'} - Active`;
+    } else if (state === 'grace') {
+      primaryButton = { label: 'Complete Payment', action: 'payment', url: `${webUrl}/billing` };
+      secondaryButton = { label: 'Dashboard', action: 'dashboard', url: `${webUrl}/dashboard` };
+      bannerText = `Payment Due - ${graceDaysRemaining} days grace remaining`;
+      bannerStyle = 'warning';
+    } else if (state === 'suspended') {
+      primaryButton = { label: 'Resolve Payment', action: 'resolve_payment', url: `${webUrl}/billing/resolve` };
+      secondaryButton = { label: 'Contact Support', action: 'support', url: `${webUrl}/support` };
+      bannerText = 'Account Suspended - Payment Required';
+      bannerStyle = 'error';
+      blockingMessage = 'Your account is suspended due to payment failure. Please resolve to continue.';
+    } else if (state === 'expired') {
+      if (hasAccount) {
+        primaryButton = { label: 'Renew', action: 'renew', url: `${webUrl}/pricing` };
+        secondaryButton = { label: 'View Plans', action: 'plans', url: `${webUrl}/pricing` };
+        blockingMessage = 'Your subscription has expired. Renew to continue using JoinCloud.';
+      } else {
+        primaryButton = { label: 'Sign In to Continue', action: 'sign_in', url: `${webUrl}/auth/login?deviceId=${deviceId}` };
+        secondaryButton = { label: 'View Plans', action: 'plans', url: `${webUrl}/pricing` };
+        blockingMessage = 'Your trial has expired. Sign in to continue or view our plans.';
+      }
+      bannerText = license?.tier === 'TRIAL' ? 'Trial Expired' : 'Subscription Expired';
+      bannerStyle = 'error';
+    } else if (state === 'revoked') {
+      primaryButton = { label: 'Contact Support', action: 'support', url: `${webUrl}/support` };
+      bannerText = 'License Revoked';
+      bannerStyle = 'error';
+      blockingMessage = 'Your license has been revoked. Please contact support for assistance.';
+    }
+    
+    return {
+      deviceId,
+      license: {
+        id: license?.id || null,
+        tier: license?.tier || 'TRIAL',
+        state,
+        expiresAt: license?.expiresAt || null,
+        daysRemaining,
+        graceEndsAt: license?.graceEndsAt || null,
+        graceDaysRemaining,
+      },
+      account: {
+        linked: hasAccount,
+        email: account?.email || null,
+        hasPaymentMethod: !!subscription,
+      },
+      subscription: subscription ? {
+        active: subscription.status === 'active',
+        status: subscription.status,
+        renewalDate: subscription.currentPeriodEnd,
+        paymentDueDate: subscription.paymentDueDate,
+      } : null,
+      ui: {
+        primaryButton,
+        secondaryButton,
+        showSignOut: hasAccount,
+        bannerText,
+        bannerStyle,
+        isBlocked,
+        blockingMessage,
+      },
+    };
+  }
+
+  // === DEVICE-ONLY LICENSE ===
+
+  async createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License> {
+    const now = new Date().toISOString();
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const licenseId = require('crypto').randomUUID();
+    
+    // Create a device-only account (placeholder)
+    const deviceAccountId = deviceId;
+    const deviceEmail = `${deviceId}@device.local`;
+    
+    // Ensure device account exists
+    await this.ensureDeviceAccount(deviceId);
+    
+    // Create the license
+    db.prepare(`
+      INSERT INTO licenses (id, account_id, tier, device_limit, issued_at, expires_at, state, signature, created_at, updated_at, is_device_only)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run(
+      licenseId,
+      deviceAccountId,
+      tier,
+      1,
+      nowUnix,
+      expiresAt,
+      tier === 'TRIAL' ? 'trial_active' : 'active',
+      signature,
+      now,
+      now
+    );
+    
+    // Link license to device
+    await this.addLicenseHost(licenseId, deviceId);
+    
+    const row = db.prepare('SELECT * FROM licenses WHERE id = ?').get(licenseId) as any;
+    return this.mapLicenseRow(row);
+  }
+
+  async getLicenseByDeviceId(deviceId: string): Promise<License | null> {
+    return this.getLicenseForHost(deviceId);
+  }
+
+  async linkLicenseToAccount(licenseId: string, accountId: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE licenses SET account_id = ?, is_device_only = 0, updated_at = ? WHERE id = ?').run(accountId, now, licenseId);
+  }
+
+  // === SUSPENSION ===
+
+  async suspendHost(hostUuid: string, reason: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE hosts SET suspended = 1, suspension_reason = ?, updated_at = ? WHERE host_uuid = ?').run(reason, now, hostUuid);
+  }
+
+  async unsuspendHost(hostUuid: string): Promise<void> {
+    const now = new Date().toISOString();
+    db.prepare('UPDATE hosts SET suspended = 0, suspension_reason = NULL, updated_at = ? WHERE host_uuid = ?').run(now, hostUuid);
+  }
+
+  isHostSuspended(hostUuid: string): boolean {
+    const row = db.prepare('SELECT suspended FROM hosts WHERE host_uuid = ?').get(hostUuid) as any;
+    return row?.suspended === 1;
+  }
+
+  // === ACCOUNT DEVICE TRACKING ===
+
+  async incrementDeviceChangeCount(accountId: string): Promise<number> {
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE accounts 
+      SET device_change_count = COALESCE(device_change_count, 0) + 1, 
+          last_device_change_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(now, now, accountId);
+    
+    const row = db.prepare('SELECT device_change_count FROM accounts WHERE id = ?').get(accountId) as any;
+    return Number(row?.device_change_count ?? 1);
+  }
+
+  // === SUBSCRIPTION STATS ===
+
+  async getSubscriptionStats(): Promise<SubscriptionStats> {
+    const now = Math.floor(Date.now() / 1000);
+    const oneMonthAgo = now - (30 * 24 * 60 * 60);
+    
+    // Get all subscriptions
+    const subscriptions = db.prepare('SELECT * FROM subscriptions').all() as any[];
+    const activeSubscriptions = subscriptions.filter(s => s.status === 'active');
+    
+    // Calculate MRR
+    let mrr = 0;
+    for (const sub of activeSubscriptions) {
+      const amount = Number(sub.amount ?? 0);
+      if (sub.interval === 'year') {
+        mrr += amount / 12;
+      } else {
+        mrr += amount;
+      }
+    }
+    
+    // Get trial users
+    const trialUsers = db.prepare("SELECT COUNT(*) as c FROM licenses WHERE state = 'trial_active'").get() as any;
+    
+    // Calculate churn (simplified: cancelled in last 30 days / active at start)
+    const cancelledLastMonth = subscriptions.filter(s => 
+      s.status === 'cancelled' && 
+      new Date(s.updated_at).getTime() / 1000 > oneMonthAgo
+    ).length;
+    const churnRate = activeSubscriptions.length > 0 
+      ? (cancelledLastMonth / (activeSubscriptions.length + cancelledLastMonth)) * 100 
+      : 0;
+    
+    // By plan
+    const planStats: Record<string, { count: number; revenue: number }> = {};
+    for (const sub of activeSubscriptions) {
+      const plan = sub.plan || 'unknown';
+      if (!planStats[plan]) planStats[plan] = { count: 0, revenue: 0 };
+      planStats[plan].count++;
+      planStats[plan].revenue += Number(sub.amount ?? 0);
+    }
+    
+    // By device platform
+    const deviceStats = db.prepare(`
+      SELECT h.platform, COUNT(DISTINCT lh.host_uuid) as count
+      FROM license_hosts lh
+      INNER JOIN hosts h ON h.host_uuid = lh.host_uuid
+      INNER JOIN licenses l ON l.id = lh.license_id
+      WHERE l.state IN ('active', 'trial_active', 'grace')
+      GROUP BY h.platform
+    `).all() as any[];
+    
+    return {
+      totalMonthlyRevenue: mrr,
+      totalYearlyRevenue: mrr * 12,
+      mrr,
+      arr: mrr * 12,
+      activeSubscriptions: activeSubscriptions.length,
+      trialUsers: Number(trialUsers?.c ?? 0),
+      churnRate: Math.round(churnRate * 100) / 100,
+      byCountry: [], // Would need country data from payment provider
+      byPlan: Object.entries(planStats).map(([plan, stats]) => ({ plan, ...stats })),
+      byDevice: deviceStats.map(d => ({ platform: d.platform || 'unknown', count: Number(d.count ?? 0) })),
+    };
   }
 }
 

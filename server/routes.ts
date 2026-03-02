@@ -400,7 +400,13 @@ export async function registerRoutes(
   app.post("/api/v1/auth/register", authRateLimit, async (req, res) => {
     setCors(req, res);
     try {
-      const { email, password } = authRegisterSchema.parse(req.body);
+      const { email, password, referralCode, deviceId } = z.object({
+        email: z.string().email(),
+        password: z.string().min(8),
+        referralCode: z.string().optional(),
+        deviceId: z.string().optional(),
+      }).parse(req.body);
+      
       const existing = await storage.getAccountByEmail(email);
       if (existing) {
         res.status(400).json({ message: "Email already registered" });
@@ -409,6 +415,91 @@ export async function registerRoutes(
       const hash = await bcrypt.hash(password, 10);
       const id = crypto.randomUUID();
       const account = await storage.createAccount(id, email, hash);
+      
+      // Generate unique referral code for this account
+      const userReferralCode = 'JC-' + crypto.createHash('sha256')
+        .update(email + Date.now())
+        .digest('hex')
+        .substring(0, 5)
+        .toUpperCase();
+      await storage.updateAccountReferral(account.id, { referralCode: userReferralCode });
+      
+      // Process referral code if provided
+      let referralApplied = false;
+      let referralDaysAdded = 0;
+      if (referralCode) {
+        const referrer = await storage.getAccountByReferralCode(referralCode);
+        if (referrer && referrer.id !== account.id) {
+          const REFERRAL_DAYS = 10;
+          
+          // Create referral record
+          await storage.createReferral({
+            id: crypto.randomUUID(),
+            referrerAccountId: referrer.id,
+            referredAccountId: account.id,
+            referralCode: referralCode,
+            daysGranted: REFERRAL_DAYS,
+            status: 'completed',
+          });
+          
+          // Update referrer stats
+          await storage.updateAccountReferral(referrer.id, {
+            referralCount: (referrer.referralCount || 0) + 1,
+            referralDaysEarned: (referrer.referralDaysEarned || 0) + REFERRAL_DAYS,
+          });
+          
+          // Mark new user as referred
+          await storage.updateAccountReferral(account.id, { referredBy: referralCode });
+          
+          // Extend referrer's license by 10 days
+          const referrerLicense = await storage.getActiveLicenseForAccount(referrer.id);
+          if (referrerLicense) {
+            const newExpiry = referrerLicense.expiresAt + (REFERRAL_DAYS * 24 * 60 * 60);
+            const newSignature = signLicense({
+              license_id: referrerLicense.id,
+              account_id: referrerLicense.accountId,
+              tier: referrerLicense.tier,
+              device_limit: referrerLicense.deviceLimit,
+              issued_at: referrerLicense.issuedAt,
+              expires_at: newExpiry,
+              state: referrerLicense.state,
+            });
+            await storage.updateLicense(referrerLicense.id, {
+              expiresAt: newExpiry,
+              signature: newSignature,
+            });
+          }
+          
+          referralApplied = true;
+          referralDaysAdded = REFERRAL_DAYS;
+        }
+      }
+      
+      // If deviceId provided, link any existing device license to this account
+      if (deviceId) {
+        const deviceLicense = await storage.getLicenseForHost(deviceId);
+        if (deviceLicense && deviceLicense.accountId.includes('@device.local')) {
+          await storage.linkLicenseToAccount(deviceLicense.id, account.id);
+          
+          // If referral was applied, also extend this license
+          if (referralApplied && referralDaysAdded > 0) {
+            const newExpiry = deviceLicense.expiresAt + (referralDaysAdded * 24 * 60 * 60);
+            const newSignature = signLicense({
+              license_id: deviceLicense.id,
+              account_id: account.id,
+              tier: deviceLicense.tier,
+              device_limit: deviceLicense.deviceLimit,
+              issued_at: deviceLicense.issuedAt,
+              expires_at: newExpiry,
+              state: deviceLicense.state,
+            });
+            await storage.updateLicense(deviceLicense.id, {
+              expiresAt: newExpiry,
+              signature: newSignature,
+            });
+          }
+        }
+      }
       
       // Check for pending team invitation for this email
       const pendingInvitation = await storage.getTeamInvitationByEmail(email);
@@ -433,15 +524,19 @@ export async function registerRoutes(
           console.log(`User ${email} auto-joined team from invitation ${pendingInvitation.id}`);
         } catch (invErr) {
           console.error("Failed to process team invitation:", invErr);
-          // Don't fail registration if team assignment fails
         }
       }
       
       const token = signToken({ accountId: account.id, email: account.email });
       res.status(201).json({
-        user: { id: account.id, email: account.email },
+        user: { id: account.id, email: account.email, referralCode: userReferralCode },
         token,
         team: teamInfo,
+        referral: referralApplied ? {
+          applied: true,
+          daysAdded: referralDaysAdded,
+          message: `Referral applied! You got ${referralDaysAdded} extra days.`,
+        } : null,
       });
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -560,6 +655,115 @@ export async function registerRoutes(
         return;
       }
       console.error("Bootstrap trial error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === DEVICE REGISTRATION & LICENSE CHECK ===
+  // New endpoint that returns full license state for desktop app UI
+  app.post("/api/v1/devices/register", async (req, res) => {
+    setCors(req, res);
+    try {
+      const { deviceId, appVersion, platform } = z.object({
+        deviceId: z.string().min(8).max(128),
+        appVersion: z.string().optional(),
+        platform: z.string().optional(),
+      }).parse(req.body);
+
+      // Ensure host row exists
+      await storage.ensureHostRow(deviceId);
+      
+      // Register/update host with version and platform
+      if (appVersion || platform) {
+        try {
+          await storage.registerHost({
+            host_uuid: deviceId,
+            installation_id: deviceId,
+            first_installed_at: Math.floor(Date.now() / 1000),
+            version: appVersion || '0.0.0',
+            platform: platform || 'unknown',
+            arch: 'unknown',
+          });
+        } catch (e) {
+          // Host already exists, update via heartbeat
+          await storage.hostHeartbeat({
+            host_uuid: deviceId,
+            version: appVersion || '0.0.0',
+          });
+        }
+      }
+
+      // Check for existing license
+      let license = await storage.getLicenseForHost(deviceId);
+
+      // If no license, create trial license
+      if (!license) {
+        const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+        const trialEnds = new Date(trial.trialEndsAt);
+        const now = new Date();
+        const isExpired = now >= trialEnds;
+
+        if (!isExpired) {
+          // Create device-only trial license
+          const nowSec = Math.floor(Date.now() / 1000);
+          const expiresAt = Math.floor(trialEnds.getTime() / 1000);
+          const licenseId = `lic_trial_${deviceId}`;
+          
+          // Check if license with this ID already exists
+          const existingLicense = await storage.getLicenseById(licenseId);
+          if (!existingLicense) {
+            const signature = signLicense({
+              license_id: licenseId,
+              account_id: deviceId,
+              tier: "TRIAL",
+              device_limit: 1,
+              issued_at: nowSec,
+              expires_at: expiresAt,
+              state: "trial_active",
+            });
+            
+            license = await storage.createDeviceOnlyLicense(
+              deviceId,
+              "TRIAL",
+              expiresAt,
+              signature
+            );
+          } else {
+            license = existingLicense;
+          }
+        }
+      }
+
+      // Get full license check response
+      const licenseCheckResponse = await storage.getLicenseCheckResponse(deviceId);
+      
+      res.json(licenseCheckResponse);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Device register error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // License check endpoint - returns current license state for device
+  app.get("/api/v1/license/check", async (req, res) => {
+    setCors(req, res);
+    try {
+      const { deviceId } = z.object({
+        deviceId: z.string().min(8).max(128),
+      }).parse(req.query);
+
+      const licenseCheckResponse = await storage.getLicenseCheckResponse(deviceId);
+      res.json(licenseCheckResponse);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("License check error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
@@ -733,6 +937,40 @@ export async function registerRoutes(
         }
       }
 
+      // If this is a trial license and can be extended, extend to 14 days total
+      if (license && license.tier.toLowerCase() === 'trial' && license.state === 'trial_active') {
+        if (storage.canExtendDeviceTrial(deviceId)) {
+          try {
+            await storage.extendDeviceTrial(deviceId, 7); // Extend by 7 more days (7+7=14 total)
+            // Update license expiration
+            const newTrial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+            const newExpiresAt = Math.floor(new Date(newTrial.trialEndsAt).getTime() / 1000);
+            const newSignature = signLicense({
+              license_id: license.id,
+              account_id: accountId,
+              tier: license.tier,
+              device_limit: license.deviceLimit,
+              issued_at: license.issuedAt,
+              expires_at: newExpiresAt,
+              state: license.state,
+            });
+            await storage.updateLicense(license.id, {
+              expiresAt: newExpiresAt,
+              signature: newSignature,
+            });
+            license = await storage.getLicenseById(license.id);
+          } catch (e) {
+            // Trial already extended, ignore
+          }
+        }
+        
+        // Link the device-only license to the real account
+        if (license && license.accountId !== accountId) {
+          await storage.linkLicenseToAccount(license.id, accountId);
+          license = await storage.getLicenseById(license.id);
+        }
+      }
+
       const jwt = signToken({ accountId, email });
       const responsePayload: Record<string, unknown> = { jwt, accountId, email };
       if (license) {
@@ -749,6 +987,10 @@ export async function registerRoutes(
         };
         if (license.graceEndsAt != null) signedLicense.grace_ends_at = license.graceEndsAt;
         responsePayload.license = signedLicense;
+        
+        // Include trial extension info
+        responsePayload.trialExtended = true;
+        responsePayload.message = "Trial extended to 14 days!";
       }
       res.json(responsePayload);
     } catch (err) {
@@ -1889,10 +2131,19 @@ export async function registerRoutes(
         tier: z.enum(["trial", "pro", "teams", "custom"]).optional(),
         deviceLimit: z.number().int().min(1).max(100).optional(),
         expiresAt: z.number().int().positive().optional(),
-        state: z.enum(["trial_active", "active", "grace", "expired", "revoked"]).optional(),
+        state: z.enum(["trial_active", "active", "grace", "expired", "revoked", "suspended"]).optional(),
         customQuota: z.number().int().min(0).max(10000).nullable().optional(),
         extendTrialDays: z.number().int().min(1).max(365).optional(),
         extendDuration: z.enum(["7d", "30d", "90d", "180d", "365d"]).optional(),
+        // New quota control fields
+        shareLimitMonthly: z.number().int().min(0).max(100000).optional(),
+        userLimit: z.number().int().min(1).max(100).optional(),
+        teamLimit: z.number().int().min(0).max(50).optional(),
+        devicesPerUser: z.number().int().min(1).max(20).optional(),
+        additionalDeviceIds: z.array(z.string()).optional(),
+        notes: z.string().max(1000).optional(),
+        // Overrides JSON for custom quotas
+        overridesJson: z.string().optional(),
       }).parse(req.body);
 
       const license = await storage.getLicenseById(licenseId);
@@ -1938,6 +2189,63 @@ export async function registerRoutes(
         updates.expiresAt = Math.max(currentExpires, now) + days * 86400;
       }
 
+      // Handle extended quota fields by updating the license billing info
+      const billingUpdates: Record<string, any> = {};
+      if (body.notes !== undefined) billingUpdates.notes = body.notes;
+      
+      // Store extended quotas in overrides_json column
+      if (body.shareLimitMonthly !== undefined || 
+          body.userLimit !== undefined || 
+          body.teamLimit !== undefined || 
+          body.devicesPerUser !== undefined ||
+          body.additionalDeviceIds !== undefined ||
+          body.overridesJson !== undefined) {
+        
+        let overrides: Record<string, any> = {};
+        
+        // Parse existing overrides if any
+        try {
+          const existingOverrides = await storage.getLicenseById(licenseId);
+          if (existingOverrides && (existingOverrides as any).overridesJson) {
+            overrides = JSON.parse((existingOverrides as any).overridesJson);
+          }
+        } catch (e) {
+          overrides = {};
+        }
+        
+        // Update with new values
+        if (body.shareLimitMonthly !== undefined) overrides.shareLimitMonthly = body.shareLimitMonthly;
+        if (body.userLimit !== undefined) overrides.userLimit = body.userLimit;
+        if (body.teamLimit !== undefined) overrides.teamLimit = body.teamLimit;
+        if (body.devicesPerUser !== undefined) overrides.devicesPerUser = body.devicesPerUser;
+        if (body.additionalDeviceIds !== undefined) overrides.additionalDeviceIds = body.additionalDeviceIds;
+        
+        // If raw overridesJson provided, merge it
+        if (body.overridesJson) {
+          try {
+            const parsed = JSON.parse(body.overridesJson);
+            overrides = { ...overrides, ...parsed };
+          } catch (e) {
+            res.status(400).json({ message: "Invalid overridesJson format" });
+            return;
+          }
+        }
+        
+        // Store overrides (using the existing overrides_json column)
+        const overridesStr = JSON.stringify(overrides);
+        const now = new Date().toISOString();
+        // Direct DB update for overrides_json
+        try {
+          const Database = require('better-sqlite3');
+          const dbPath = process.env.JOINCLOUD_CONTROL_PLANE_DB_PATH || require('path').join(process.cwd(), 'data', 'telemetry.db');
+          const db = new Database(dbPath);
+          db.prepare('UPDATE licenses SET overrides_json = ?, updated_at = ? WHERE id = ?').run(overridesStr, now, licenseId);
+          db.close();
+        } catch (dbErr) {
+          console.error("Failed to update overrides_json:", dbErr);
+        }
+      }
+
       if (Object.keys(updates).length > 0) {
         const payload = {
           license_id: license.id,
@@ -1951,6 +2259,27 @@ export async function registerRoutes(
         };
         updates.signature = signLicense(payload);
         await storage.updateLicense(licenseId, updates);
+      }
+      
+      // Update billing info if any
+      if (Object.keys(billingUpdates).length > 0) {
+        await storage.updateLicenseBilling(licenseId, billingUpdates);
+      }
+
+      // If state changed to suspended, suspend the host
+      if (body.state === 'suspended') {
+        const hosts = await storage.getHostsForLicense(licenseId);
+        for (const host of hosts) {
+          await storage.suspendHost(host.host_uuid, 'admin_action');
+        }
+      }
+      
+      // If state changed from suspended, unsuspend the hosts
+      if (body.state && body.state !== 'suspended' && license.state === 'suspended') {
+        const hosts = await storage.getHostsForLicense(licenseId);
+        for (const host of hosts) {
+          await storage.unsuspendHost(host.host_uuid);
+        }
       }
 
       res.json({ success: true, message: "License updated" });
@@ -2488,6 +2817,376 @@ export async function registerRoutes(
       }
       console.error("Billing portal error:", err);
       res.status(500).json({ message: "Failed to create billing portal session" });
+    }
+  });
+
+  // === REFERRAL SYSTEM ===
+  
+  // Get referral stats for authenticated user
+  app.options("/api/v1/referral/stats", (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.sendStatus(204);
+  });
+  app.get("/api/v1/referral/stats", requireAuth, async (req, res) => {
+    setCors(req, res);
+    try {
+      const auth = (req as any).auth as { accountId: string; email: string };
+      const stats = await storage.getReferralStats(auth.accountId);
+      res.json(stats);
+    } catch (err) {
+      console.error("Referral stats error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Apply referral code (after signup)
+  app.options("/api/v1/referral/apply", (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.sendStatus(204);
+  });
+  app.post("/api/v1/referral/apply", requireAuth, async (req, res) => {
+    setCors(req, res);
+    try {
+      const { referralCode } = z.object({
+        referralCode: z.string().min(1).max(20),
+      }).parse(req.body);
+      
+      const auth = (req as any).auth as { accountId: string; email: string };
+      const account = await storage.getAccountById(auth.accountId);
+      
+      if (!account) {
+        res.status(404).json({ message: "Account not found" });
+        return;
+      }
+      
+      // Check if user already used a referral code
+      if (account.referredBy) {
+        res.status(400).json({ 
+          error: "already_used", 
+          message: "You have already used a referral code" 
+        });
+        return;
+      }
+      
+      // Find referrer by code
+      const referrer = await storage.getAccountByReferralCode(referralCode);
+      if (!referrer) {
+        res.status(400).json({ 
+          error: "invalid_code", 
+          message: "Referral code not found" 
+        });
+        return;
+      }
+      
+      // Prevent self-referral
+      if (referrer.id === auth.accountId) {
+        res.status(400).json({ 
+          error: "self_referral", 
+          message: "Cannot use your own referral code" 
+        });
+        return;
+      }
+      
+      const REFERRAL_DAYS = 10;
+      
+      // Extend user's license
+      const userLicense = await storage.getActiveLicenseForAccount(auth.accountId) 
+        ?? await storage.getLatestLicenseForAccount(auth.accountId);
+      
+      let newUserExpiresAt = 0;
+      if (userLicense) {
+        const now = Math.floor(Date.now() / 1000);
+        // If expired, extend from now; otherwise extend from current expiry
+        const baseExpiry = userLicense.expiresAt > now ? userLicense.expiresAt : now;
+        newUserExpiresAt = baseExpiry + (REFERRAL_DAYS * 24 * 60 * 60);
+        
+        const newState = userLicense.tier.toLowerCase() === 'trial' ? 'trial_active' : 'active';
+        const newSignature = signLicense({
+          license_id: userLicense.id,
+          account_id: userLicense.accountId,
+          tier: userLicense.tier,
+          device_limit: userLicense.deviceLimit,
+          issued_at: userLicense.issuedAt,
+          expires_at: newUserExpiresAt,
+          state: newState,
+        });
+        
+        await storage.updateLicense(userLicense.id, {
+          expiresAt: newUserExpiresAt,
+          state: newState,
+          signature: newSignature,
+        });
+      }
+      
+      // Extend referrer's license
+      const referrerLicense = await storage.getActiveLicenseForAccount(referrer.id)
+        ?? await storage.getLatestLicenseForAccount(referrer.id);
+      
+      if (referrerLicense) {
+        const now = Math.floor(Date.now() / 1000);
+        const baseExpiry = referrerLicense.expiresAt > now ? referrerLicense.expiresAt : now;
+        const newExpiry = baseExpiry + (REFERRAL_DAYS * 24 * 60 * 60);
+        
+        const newState = referrerLicense.tier.toLowerCase() === 'trial' ? 'trial_active' : 'active';
+        const newSignature = signLicense({
+          license_id: referrerLicense.id,
+          account_id: referrerLicense.accountId,
+          tier: referrerLicense.tier,
+          device_limit: referrerLicense.deviceLimit,
+          issued_at: referrerLicense.issuedAt,
+          expires_at: newExpiry,
+          state: newState,
+        });
+        
+        await storage.updateLicense(referrerLicense.id, {
+          expiresAt: newExpiry,
+          state: newState,
+          signature: newSignature,
+        });
+      }
+      
+      // Create referral record
+      await storage.createReferral({
+        id: crypto.randomUUID(),
+        referrerAccountId: referrer.id,
+        referredAccountId: auth.accountId,
+        referralCode: referralCode,
+        daysGranted: REFERRAL_DAYS,
+        status: 'completed',
+      });
+      
+      // Update referrer stats
+      await storage.updateAccountReferral(referrer.id, {
+        referralCount: (referrer.referralCount || 0) + 1,
+        referralDaysEarned: (referrer.referralDaysEarned || 0) + REFERRAL_DAYS,
+      });
+      
+      // Mark user as referred
+      await storage.updateAccountReferral(auth.accountId, { referredBy: referralCode });
+      
+      res.json({
+        success: true,
+        daysAdded: REFERRAL_DAYS,
+        newExpiresAt: newUserExpiresAt,
+        message: `Referral applied! You got ${REFERRAL_DAYS} extra days.`,
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Referral apply error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === DEVICE RECOVERY REQUESTS ===
+  
+  // User requests device recovery
+  app.post("/api/v1/recovery/request", requireAuth, async (req, res) => {
+    setCors(req, res);
+    try {
+      const { newDeviceId, reason } = z.object({
+        newDeviceId: z.string().min(8).max(128),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      
+      const auth = (req as any).auth as { accountId: string; email: string };
+      
+      // Get current license and device
+      const license = await storage.getActiveLicenseForAccount(auth.accountId)
+        ?? await storage.getLatestLicenseForAccount(auth.accountId);
+      
+      if (!license) {
+        res.status(400).json({ message: "No license found for this account" });
+        return;
+      }
+      
+      const hosts = await storage.getHostsForLicense(license.id);
+      if (hosts.length === 0) {
+        // No existing device, can directly activate on new device
+        await storage.addLicenseHost(license.id, newDeviceId);
+        res.json({ 
+          success: true, 
+          autoApproved: true,
+          message: "License activated on new device" 
+        });
+        return;
+      }
+      
+      const oldDeviceId = hosts[0].host_uuid;
+      
+      // Check device change count for suspicious activity
+      const deviceChangeCount = await storage.incrementDeviceChangeCount(auth.accountId);
+      
+      if (deviceChangeCount <= 2) {
+        // Auto-approve for first 2 device changes
+        await storage.removeLicenseHost(license.id, oldDeviceId);
+        await storage.addLicenseHost(license.id, newDeviceId);
+        
+        res.json({ 
+          success: true, 
+          autoApproved: true,
+          message: "License transferred to new device" 
+        });
+        return;
+      }
+      
+      if (deviceChangeCount >= 5) {
+        // Suspend account for too many changes
+        await storage.suspendHost(newDeviceId, 'suspicious_activity');
+        res.status(403).json({ 
+          error: 'suspended',
+          message: "Account suspended due to suspicious activity. Please contact support." 
+        });
+        return;
+      }
+      
+      // Create recovery request for admin approval (3-4 changes)
+      const requestId = crypto.randomUUID();
+      await storage.createDeviceRecoveryRequest({
+        id: requestId,
+        accountId: auth.accountId,
+        oldDeviceId,
+        newDeviceId,
+        reason: reason || null,
+        status: 'pending',
+        adminNotes: null,
+      });
+      
+      res.json({ 
+        success: true, 
+        pendingApproval: true,
+        requestId,
+        message: "Recovery request submitted. Pending admin approval." 
+      });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Recovery request error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Check recovery request status
+  app.get("/api/v1/recovery/status", requireAuth, async (req, res) => {
+    setCors(req, res);
+    try {
+      const auth = (req as any).auth as { accountId: string; email: string };
+      const requests = await storage.getRecoveryRequestsByAccountId(auth.accountId);
+      res.json({ requests });
+    } catch (err) {
+      console.error("Recovery status error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ADMIN: DEVICE RECOVERY MANAGEMENT ===
+  
+  app.get("/api/admin/recovery-requests", async (req, res) => {
+    try {
+      const requests = await storage.getPendingRecoveryRequests();
+      
+      // Enrich with account info
+      const enrichedRequests = await Promise.all(requests.map(async (req) => {
+        const account = await storage.getAccountById(req.accountId);
+        return {
+          ...req,
+          email: account?.email || 'Unknown',
+          deviceChangeCount: account?.deviceChangeCount || 0,
+        };
+      }));
+      
+      res.json(enrichedRequests);
+    } catch (err) {
+      console.error("Admin recovery requests error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/recovery-requests/:requestId/resolve", async (req, res) => {
+    try {
+      const { requestId } = req.params;
+      const { status, adminNotes } = z.object({
+        status: z.enum(['approved', 'rejected']),
+        adminNotes: z.string().optional(),
+      }).parse(req.body);
+      
+      await storage.resolveDeviceRecoveryRequest(
+        requestId,
+        status,
+        adminNotes || '',
+        'admin' // TODO: Get actual admin user
+      );
+      
+      res.json({ success: true });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Admin resolve recovery error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ADMIN: SUBSCRIPTION STATS ===
+  
+  app.get("/api/admin/subscription-stats", async (req, res) => {
+    try {
+      const stats = await storage.getSubscriptionStats();
+      res.json(stats);
+    } catch (err) {
+      console.error("Subscription stats error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === ADMIN: PAYMENTS ===
+  
+  app.get("/api/admin/payments", async (req, res) => {
+    try {
+      const { accountId, deviceId } = req.query as { accountId?: string; deviceId?: string };
+      
+      let payments: any[] = [];
+      
+      if (accountId) {
+        payments = await storage.getPaymentsByAccountId(accountId);
+      } else if (deviceId) {
+        const license = await storage.getLicenseForHost(deviceId);
+        if (license) {
+          const subscription = await storage.getSubscriptionByLicenseId(license.id);
+          if (subscription) {
+            payments = await storage.getPaymentsBySubscriptionId(subscription.id);
+          }
+        }
+      } else {
+        // Get all subscriptions and their payments
+        const subscriptions = await storage.listSubscriptions();
+        for (const sub of subscriptions) {
+          const subPayments = await storage.getPaymentsBySubscriptionId(sub.id);
+          payments.push(...subPayments);
+        }
+      }
+      
+      // Calculate LTV per account
+      const ltvByAccount: Record<string, number> = {};
+      for (const payment of payments) {
+        if (payment.status === 'captured') {
+          ltvByAccount[payment.accountId] = (ltvByAccount[payment.accountId] || 0) + payment.amount;
+        }
+      }
+      
+      res.json({ payments, ltvByAccount });
+    } catch (err) {
+      console.error("Admin payments error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
     }
   });
 

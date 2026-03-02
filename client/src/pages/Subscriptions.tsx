@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { RefreshCw, AlertTriangle, DollarSign, TrendingUp, Users, CreditCard, Calendar, ChevronDown, ChevronUp } from "lucide-react";
+import { RefreshCw, AlertTriangle, DollarSign, TrendingUp, Users, CreditCard, Calendar, ChevronDown, ChevronUp, Search, BarChart3, Monitor, Globe, Smartphone, Laptop, Receipt } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -61,9 +62,37 @@ interface BillingSummary {
   revenueByProvider: { provider: string; amount: number; count: number }[];
 }
 
+interface SubscriptionStats {
+  mrr: number;
+  arr: number;
+  activeSubscriptions: number;
+  trialUsers: number;
+  churnRate: number;
+  revenueByPlan: { plan: string; amount: number; count: number }[];
+  revenueByDevice: { platform: string; amount: number; count: number }[];
+  revenueByCountry: { country: string; amount: number; count: number }[];
+}
+
+interface Payment {
+  id: string;
+  subscriptionId: string;
+  accountId: string;
+  deviceId: string | null;
+  provider: string;
+  providerPaymentId: string;
+  amount: number;
+  currency: string;
+  status: string;
+  invoiceUrl: string | null;
+  createdAt: string;
+  accountEmail?: string;
+}
+
 export default function Subscriptions() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<"subscriptions" | "payments">("subscriptions");
 
   const { data: accounts, isLoading: accountsLoading, error: accountsError } = useQuery<AccountWithBilling[]>({
     queryKey: ["/api/admin/accounts-with-billing"],
@@ -83,6 +112,27 @@ export default function Subscriptions() {
       return res.json();
     },
     refetchInterval: 60000,
+  });
+
+  const { data: subscriptionStats } = useQuery<SubscriptionStats>({
+    queryKey: ["/api/admin/subscription-stats"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/subscription-stats");
+      if (!res.ok) throw new Error("Failed to fetch subscription stats");
+      return res.json();
+    },
+    refetchInterval: 60000,
+  });
+
+  const { data: payments, isLoading: paymentsLoading } = useQuery<Payment[]>({
+    queryKey: ["/api/admin/payments"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/payments");
+      if (!res.ok) throw new Error("Failed to fetch payments");
+      return res.json();
+    },
+    enabled: activeTab === "payments",
+    refetchInterval: 30000,
   });
 
   const formatDate = (dateStr: string | number | null | undefined) => {
@@ -201,20 +251,48 @@ export default function Subscriptions() {
     );
   };
 
-  const filtered = (accounts ?? []).filter((a) => {
-    if (statusFilter === "all") return true;
-    if (statusFilter === "with_subscription") return !!a.subscriptionId || !!a.razorpaySubscriptionId || (a.license && a.license.state === "active");
-    if (statusFilter === "razorpay") return !!a.razorpaySubscriptionId;
-    if (statusFilter === "stripe") return !!a.stripeCustomerId;
-    if (statusFilter === "grace") return !!a.graceEndsAt || a.license?.state === "grace";
-    if (statusFilter === "trial") return a.license?.state === "trial_active";
-    if (statusFilter === "teams") return a.license?.tier === "teams";
-    if (statusFilter === "pro") return a.license?.tier === "pro";
-    return a.subscriptionStatus === statusFilter || a.license?.state === statusFilter;
-  });
+  const filtered = useMemo(() => {
+    let list = accounts ?? [];
+    
+    // Search filter
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((a) => 
+        a.email.toLowerCase().includes(q) ||
+        a.license?.id?.toLowerCase().includes(q) ||
+        a.id.toLowerCase().includes(q)
+      );
+    }
+    
+    // Status filter
+    if (statusFilter !== "all") {
+      list = list.filter((a) => {
+        if (statusFilter === "with_subscription") return !!a.subscriptionId || !!a.razorpaySubscriptionId || (a.license && a.license.state === "active");
+        if (statusFilter === "razorpay") return !!a.razorpaySubscriptionId;
+        if (statusFilter === "stripe") return !!a.stripeCustomerId;
+        if (statusFilter === "grace") return !!a.graceEndsAt || a.license?.state === "grace";
+        if (statusFilter === "trial") return a.license?.state === "trial_active";
+        if (statusFilter === "teams") return a.license?.tier === "teams";
+        if (statusFilter === "pro") return a.license?.tier === "pro";
+        if (statusFilter === "suspended") return a.license?.state === "suspended";
+        return a.subscriptionStatus === statusFilter || a.license?.state === statusFilter;
+      });
+    }
+    
+    return list;
+  }, [accounts, searchQuery, statusFilter]);
 
   const withSub = (accounts ?? []).filter((a) => !!a.subscriptionId || !!a.razorpaySubscriptionId || (a.license && a.license.state === "active")).length;
   const inGrace = (accounts ?? []).filter((a) => !!a.graceEndsAt || a.license?.state === "grace").length;
+
+  const getPlatformIcon = (platform: string) => {
+    const p = platform?.toLowerCase() || "";
+    if (p.includes("mac") || p.includes("darwin")) return <Laptop className="w-4 h-4" />;
+    if (p.includes("win")) return <Monitor className="w-4 h-4" />;
+    if (p.includes("linux")) return <Monitor className="w-4 h-4" />;
+    if (p.includes("ios") || p.includes("android")) return <Smartphone className="w-4 h-4" />;
+    return <Globe className="w-4 h-4" />;
+  };
 
   if (accountsError) {
     return (
@@ -241,33 +319,33 @@ export default function Subscriptions() {
       </div>
 
       {/* Revenue Summary Cards */}
-      <div className="grid gap-4 md:grid-cols-4 mb-6">
+      <div className="grid gap-4 md:grid-cols-5 mb-6">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
               <DollarSign className="w-4 h-4 text-emerald-500" />
-              Monthly Revenue
+              MRR
             </CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-emerald-400">
-              {isLoading ? "..." : formatCurrency(billingSummary?.totalMonthlyRevenue ?? 0)}
+              {isLoading ? "..." : formatCurrency(subscriptionStats?.mrr ?? billingSummary?.totalMonthlyRevenue ?? 0)}
             </p>
-            <p className="text-xs text-muted-foreground">Estimated monthly</p>
+            <p className="text-xs text-muted-foreground">Monthly Recurring Revenue</p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-blue-500" />
-              Yearly Revenue
+              ARR
             </CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-blue-400">
-              {isLoading ? "..." : formatCurrency(billingSummary?.totalYearlyRevenue ?? 0)}
+              {isLoading ? "..." : formatCurrency(subscriptionStats?.arr ?? billingSummary?.totalYearlyRevenue ?? 0)}
             </p>
-            <p className="text-xs text-muted-foreground">Annualized</p>
+            <p className="text-xs text-muted-foreground">Annual Recurring Revenue</p>
           </CardContent>
         </Card>
         <Card>
@@ -278,7 +356,7 @@ export default function Subscriptions() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{isLoading ? "..." : billingSummary?.totalActiveSubscriptions ?? withSub}</p>
+            <p className="text-2xl font-bold">{isLoading ? "..." : subscriptionStats?.activeSubscriptions ?? billingSummary?.totalActiveSubscriptions ?? withSub}</p>
             <p className="text-xs text-muted-foreground">Paying customers</p>
           </CardContent>
         </Card>
@@ -291,9 +369,23 @@ export default function Subscriptions() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold">
-              {isLoading ? "..." : `${inGrace} / ${billingSummary?.totalTrialAccounts ?? 0}`}
+              {isLoading ? "..." : `${inGrace} / ${subscriptionStats?.trialUsers ?? billingSummary?.totalTrialAccounts ?? 0}`}
             </p>
             <p className="text-xs text-muted-foreground">Grace period / Trial</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-red-500" />
+              Churn Rate
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold text-red-400">
+              {isLoading ? "..." : `${(subscriptionStats?.churnRate ?? 0).toFixed(1)}%`}
+            </p>
+            <p className="text-xs text-muted-foreground">Last 30 days</p>
           </CardContent>
         </Card>
       </div>
@@ -345,8 +437,28 @@ export default function Subscriptions() {
         </div>
       )}
 
+      {/* Tab Buttons */}
+      <div className="flex gap-2 mb-6">
+        <Button 
+          variant={activeTab === "subscriptions" ? "default" : "outline"} 
+          onClick={() => setActiveTab("subscriptions")}
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Subscriptions
+        </Button>
+        <Button 
+          variant={activeTab === "payments" ? "default" : "outline"} 
+          onClick={() => setActiveTab("payments")}
+          className="flex items-center gap-2"
+        >
+          <Receipt className="w-4 h-4" />
+          Payment History
+        </Button>
+      </div>
+
       {/* Subscriptions Table */}
-      {isLoading ? (
+      {activeTab === "subscriptions" && (isLoading ? (
         <Card>
           <CardContent className="p-6">
             <div className="animate-pulse space-y-4">
@@ -365,7 +477,16 @@ export default function Subscriptions() {
             <CardDescription>
               Click on a row to see detailed billing information for each account.
             </CardDescription>
-            <div className="pt-2">
+            <div className="pt-2 flex flex-wrap items-center gap-3">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by email or ID..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 w-[240px]"
+                />
+              </div>
               <Select value={statusFilter} onValueChange={setStatusFilter}>
                 <SelectTrigger className="w-[200px]">
                   <SelectValue placeholder="Filter" />
@@ -379,8 +500,12 @@ export default function Subscriptions() {
                   <SelectItem value="stripe">Stripe</SelectItem>
                   <SelectItem value="razorpay">Razorpay</SelectItem>
                   <SelectItem value="grace">In grace</SelectItem>
+                  <SelectItem value="suspended">Suspended</SelectItem>
                 </SelectContent>
               </Select>
+              <span className="text-sm text-muted-foreground ml-auto">
+                Showing {filtered.length} of {accounts?.length || 0}
+              </span>
             </div>
           </CardHeader>
           <CardContent>
@@ -495,6 +620,84 @@ export default function Subscriptions() {
             </Table>
             {filtered.length === 0 && (
               <p className="text-sm text-muted-foreground py-4 text-center">No accounts match the filter.</p>
+            )}
+          </CardContent>
+        </Card>
+      ))}
+
+      {/* Payments Tab */}
+      {activeTab === "payments" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Receipt className="w-5 h-5" />
+              Payment History
+            </CardTitle>
+            <CardDescription>
+              All payment transactions with LTV (Lifetime Value) per customer.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {paymentsLoading ? (
+              <div className="animate-pulse space-y-4">
+                <div className="h-8 bg-muted rounded w-1/3" />
+                <div className="h-32 bg-muted rounded" />
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Account</TableHead>
+                    <TableHead>Provider</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Invoice</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(payments ?? []).map((p) => (
+                    <TableRow key={p.id}>
+                      <TableCell className="text-muted-foreground">
+                        {formatDate(p.createdAt)}
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        {p.accountEmail || p.accountId.slice(0, 12) + "..."}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="capitalize">
+                          {p.provider}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        {formatCurrency(p.amount, p.currency)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={p.status === "captured" ? "default" : p.status === "failed" ? "destructive" : "secondary"}>
+                          {p.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        {p.invoiceUrl ? (
+                          <a 
+                            href={p.invoiceUrl} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="text-blue-400 hover:underline text-sm"
+                          >
+                            View
+                          </a>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+            {!paymentsLoading && (!payments || payments.length === 0) && (
+              <p className="text-sm text-muted-foreground py-4 text-center">No payments recorded yet.</p>
             )}
           </CardContent>
         </Card>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   CreditCard, 
@@ -12,7 +12,12 @@ import {
   Building,
   Wallet,
   Clock,
-  Shield
+  Shield,
+  Search,
+  Gift,
+  MessageSquare,
+  HeartHandshake,
+  Link2
 } from "lucide-react";
 import {
   Table,
@@ -85,6 +90,10 @@ interface AccountWithBilling {
   license?: License | null;
   teamMembers?: Array<{ accountId: string; email: string; role: string }>;
   teamInvitations?: TeamInvitation[];
+  referralCode?: string | null;
+  referredBy?: string | null;
+  referralCount?: number;
+  referralDaysEarned?: number;
 }
 
 export default function Accounts() {
@@ -92,6 +101,7 @@ export default function Accounts() {
   const queryClient = useQueryClient();
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<AccountWithBilling | null>(null);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -285,21 +295,43 @@ export default function Accounts() {
     return <Badge variant={variant}>{label}</Badge>;
   };
 
-  const filtered = (accounts ?? []).filter((a) => {
-    if (filterType === "all") return true;
-    if (filterType === "teams") return a.license?.tier === "teams";
-    if (filterType === "pro") return a.license?.tier === "pro";
-    if (filterType === "trial") return a.license?.state === "trial_active";
-    if (filterType === "active") return a.license?.state === "active";
-    if (filterType === "online") return a.license?.paymentMethod === "online";
-    if (filterType === "offline") return a.license?.paymentMethod === "offline";
-    if (filterType === "offer") return a.license?.paymentMethod === "offer";
-    return true;
-  });
+  const filtered = useMemo(() => {
+    let list = accounts ?? [];
+    
+    // Search filter
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((a) => 
+        a.email.toLowerCase().includes(q) ||
+        a.username?.toLowerCase().includes(q) ||
+        a.id.toLowerCase().includes(q) ||
+        a.referralCode?.toLowerCase().includes(q)
+      );
+    }
+    
+    // Type filter
+    if (filterType !== "all") {
+      list = list.filter((a) => {
+        if (filterType === "teams") return a.license?.tier === "teams";
+        if (filterType === "pro") return a.license?.tier === "pro";
+        if (filterType === "trial") return a.license?.state === "trial_active";
+        if (filterType === "active") return a.license?.state === "active";
+        if (filterType === "online") return a.license?.paymentMethod === "online";
+        if (filterType === "offline") return a.license?.paymentMethod === "offline";
+        if (filterType === "offer") return a.license?.paymentMethod === "offer";
+        if (filterType === "with_referrals") return (a.referralCount ?? 0) > 0;
+        if (filterType === "referred") return !!a.referredBy;
+        return true;
+      });
+    }
+    
+    return list;
+  }, [accounts, searchQuery, filterType]);
 
   const teamsCount = (accounts ?? []).filter(a => a.license?.tier === "teams").length;
   const proCount = (accounts ?? []).filter(a => a.license?.tier === "pro").length;
   const trialCount = (accounts ?? []).filter(a => a.license?.state === "trial_active").length;
+  const withReferrals = (accounts ?? []).filter(a => (a.referralCount ?? 0) > 0).length;
 
   const openInviteDialog = (account: AccountWithBilling) => {
     setSelectedAccount(account);
@@ -343,7 +375,7 @@ export default function Accounts() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid gap-4 md:grid-cols-4 mb-6">
+      <div className="grid gap-4 md:grid-cols-5 mb-6">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
@@ -380,6 +412,17 @@ export default function Accounts() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <Gift className="w-4 h-4 text-pink-500" />
+              With Referrals
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold">{isLoading ? "..." : withReferrals}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
               <Building className="w-4 h-4 text-muted-foreground" />
               Total Accounts
             </CardTitle>
@@ -409,7 +452,16 @@ export default function Accounts() {
             <CardDescription>
               Click on an account to see details, payment info, and team members
             </CardDescription>
-            <div className="pt-2">
+            <div className="pt-2 flex flex-wrap items-center gap-3">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by email, username, or referral code..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 w-[280px]"
+                />
+              </div>
               <Select value={filterType} onValueChange={setFilterType}>
                 <SelectTrigger className="w-[200px]">
                   <SelectValue placeholder="Filter accounts" />
@@ -423,8 +475,13 @@ export default function Accounts() {
                   <SelectItem value="online">Online payment</SelectItem>
                   <SelectItem value="offline">Offline payment</SelectItem>
                   <SelectItem value="offer">Offer/Discount</SelectItem>
+                  <SelectItem value="with_referrals">Has referrals</SelectItem>
+                  <SelectItem value="referred">Was referred</SelectItem>
                 </SelectContent>
               </Select>
+              <span className="text-sm text-muted-foreground ml-auto">
+                Showing {filtered.length} of {accounts?.length || 0}
+              </span>
             </div>
           </CardHeader>
           <CardContent>
@@ -500,6 +557,55 @@ export default function Accounts() {
                                 <p className="capitalize">
                                   {a.license?.paymentProvider ?? (a.razorpaySubscriptionId ? "razorpay" : a.stripeCustomerId ? "stripe" : "—")}
                                 </p>
+                              </div>
+                            </div>
+
+                            {/* Referral Section */}
+                            <div className="border-t border-border pt-4 mt-4">
+                              <h4 className="font-medium flex items-center gap-2 mb-3">
+                                <Gift className="w-4 h-4 text-pink-500" />
+                                Referral Details
+                              </h4>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                                <div>
+                                  <p className="text-muted-foreground">Referral Code</p>
+                                  {a.referralCode ? (
+                                    <div className="flex items-center gap-2">
+                                      <code className="text-sm bg-muted px-2 py-0.5 rounded font-mono">{a.referralCode}</code>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          navigator.clipboard.writeText(a.referralCode!);
+                                          toast({ title: "Copied referral code" });
+                                        }}
+                                        className="text-muted-foreground hover:text-white"
+                                      >
+                                        <Link2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <p className="text-muted-foreground">—</p>
+                                  )}
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground">Total Referrals</p>
+                                  <p className="flex items-center gap-1">
+                                    <HeartHandshake className="w-4 h-4 text-emerald-400" />
+                                    {a.referralCount ?? 0}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground">Days Earned</p>
+                                  <p className="text-emerald-400">+{a.referralDaysEarned ?? 0} days</p>
+                                </div>
+                                <div>
+                                  <p className="text-muted-foreground">Referred By</p>
+                                  {a.referredBy ? (
+                                    <code className="text-sm bg-muted px-2 py-0.5 rounded font-mono">{a.referredBy}</code>
+                                  ) : (
+                                    <p className="text-muted-foreground">—</p>
+                                  )}
+                                </div>
                               </div>
                             </div>
 
