@@ -40,7 +40,7 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     shareLimitMonthly: 10,
     peerChatEnabled: true,
     canExtendTrial: true,
-    uiTeasers: { showTeamsMenu: true, teamsLocked: true },
+    uiTeasers: { showTeamsMenu: false, teamsLocked: true },
   },
   PRO: {
     teamEnabled: false,
@@ -51,7 +51,7 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     shareLimitMonthly: 200,
     peerChatEnabled: true,
     canExtendTrial: false,
-    uiTeasers: { showTeamsMenu: true, teamsLocked: true },
+    uiTeasers: { showTeamsMenu: false, teamsLocked: true },
   },
   TEAMS: {
     teamEnabled: true,
@@ -111,7 +111,7 @@ export function resolveEntitlementsByState(
     return {
       ...TIER_DEFAULTS.FREE,
       canExtendTrial,
-      uiTeasers: { showTeamsMenu: true, teamsLocked: true },
+      uiTeasers: { showTeamsMenu: false, teamsLocked: true },
     };
   }
   const tierKey = (tier || "free").toLowerCase();

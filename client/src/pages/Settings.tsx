@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Settings as SettingsIcon, CreditCard, AlertTriangle } from "lucide-react";
+import { Settings as SettingsIcon, RefreshCw } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -12,10 +12,10 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 
-type PaymentMode = "LIVE" | "DEV";
+type SubscriptionMode = "manual" | "automatic";
 
 interface AdminSettings {
-  payment_mode: PaymentMode;
+  subscription_mode: SubscriptionMode;
 }
 
 export default function Settings() {
@@ -31,25 +31,25 @@ export default function Settings() {
     },
   });
 
-  const setPaymentMode = useMutation({
-    mutationFn: async (payment_mode: PaymentMode) => {
-      const res = await fetch("/api/v1/admin/settings/payment-mode", {
+  const setSubscriptionMode = useMutation({
+    mutationFn: async (subscription_mode: SubscriptionMode) => {
+      const res = await fetch("/api/v1/admin/settings/subscription-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ payment_mode }),
+        body: JSON.stringify({ subscription_mode }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || "Failed to update payment mode");
+        throw new Error(err.message || "Failed to update subscription mode");
       }
       return res.json();
     },
-    onSuccess: (_, payment_mode) => {
-      queryClient.setQueryData(["/api/v1/admin/settings"], { payment_mode });
+    onSuccess: (_, subscription_mode) => {
+      queryClient.setQueryData(["/api/v1/admin/settings"], (prev: AdminSettings | undefined) => ({ ...(prev ?? {}), subscription_mode }));
       toast({
-        title: "Payment mode updated",
-        description: `Payment mode is now ${payment_mode}.`,
+        title: "Subscription mode updated",
+        description: `Subscription mode is now ${subscription_mode}.`,
       });
     },
     onError: (err: Error) => {
@@ -61,7 +61,7 @@ export default function Settings() {
     },
   });
 
-  const paymentMode = settings?.payment_mode ?? "LIVE";
+  const subscriptionMode = settings?.subscription_mode ?? "automatic";
 
   return (
     <div className="p-6 max-w-2xl">
@@ -78,39 +78,30 @@ export default function Settings() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <CreditCard className="w-5 h-5" />
-            Payment Mode
+            <RefreshCw className="w-5 h-5" />
+            Subscription Mode
           </CardTitle>
           <CardDescription>
-            LIVE uses Razorpay checkout. DEV bypasses payments for instant license activation during development.
+            Automatic: Stripe/Razorpay handle renewals. Manual: licenses are granted by admin or manual verification; no automatic renewal.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {paymentMode === "DEV" && (
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle>DEV payment mode active</AlertTitle>
-              <AlertDescription>
-                DEV payment mode bypasses Razorpay. &quot;Get Pro&quot; and &quot;Get Teams&quot; will instantly grant licenses without payment.
-              </AlertDescription>
-            </Alert>
-          )}
           <RadioGroup
-            value={paymentMode}
-            onValueChange={(v) => setPaymentMode.mutate(v as PaymentMode)}
-            disabled={isLoading || setPaymentMode.isPending}
+            value={subscriptionMode}
+            onValueChange={(v) => setSubscriptionMode.mutate(v as SubscriptionMode)}
+            disabled={isLoading || setSubscriptionMode.isPending}
             className="flex gap-6"
           >
             <div className="flex items-center space-x-2">
-              <RadioGroupItem value="LIVE" id="live" />
-              <Label htmlFor="live" className="cursor-pointer font-medium">
-                LIVE
+              <RadioGroupItem value="automatic" id="sub-auto" />
+              <Label htmlFor="sub-auto" className="cursor-pointer font-medium">
+                Automatic
               </Label>
             </div>
             <div className="flex items-center space-x-2">
-              <RadioGroupItem value="DEV" id="dev" />
-              <Label htmlFor="dev" className="cursor-pointer font-medium">
-                DEV
+              <RadioGroupItem value="manual" id="sub-manual" />
+              <Label htmlFor="sub-manual" className="cursor-pointer font-medium">
+                Manual
               </Label>
             </div>
           </RadioGroup>

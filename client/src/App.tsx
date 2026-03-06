@@ -15,6 +15,7 @@ import SupportThread from "@/pages/SupportThread";
 import Accounts from "@/pages/Accounts";
 import Licenses from "@/pages/Licenses";
 import Subscriptions from "@/pages/Subscriptions";
+import ManualRequests from "@/pages/ManualRequests";
 import UsageAggregates from "@/pages/UsageAggregates";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -32,6 +33,7 @@ function Router() {
       <Route path="/accounts" component={Accounts} />
       <Route path="/licenses" component={Licenses} />
       <Route path="/subscriptions" component={Subscriptions} />
+      <Route path="/manual-requests" component={ManualRequests} />
       <Route path="/usage" component={UsageAggregates} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />

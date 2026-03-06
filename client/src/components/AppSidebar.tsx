@@ -23,6 +23,7 @@ import {
   Receipt,
   BarChart3,
   Settings,
+  ClipboardList,
 } from "lucide-react";
 
 interface SupportThreadPreview {
@@ -65,6 +66,11 @@ const menuItems = [
     title: "Subscriptions",
     url: "/subscriptions",
     icon: Receipt,
+  },
+  {
+    title: "Manual Requests",
+    url: "/manual-requests",
+    icon: ClipboardList,
   },
   {
     title: "Usage",

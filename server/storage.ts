@@ -283,6 +283,7 @@ db.exec(`
   );
 `);
 try { db.exec(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('payment_mode', 'LIVE')`); } catch (e) { /* exists */ }
+try { db.exec(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('subscription_mode', 'automatic')`); } catch (e) { /* exists */ }
 
 // Device-only trial: track which devices have ever used a trial (to block second trial after revoke/expiry)
 db.exec(`
@@ -326,6 +327,30 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_subscriptions_account ON subscriptions(account_id);
   CREATE INDEX IF NOT EXISTS idx_subscriptions_license ON subscriptions(license_id);
   CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+`);
+
+// Manual subscription requests (for manual subscription_mode)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS subscription_requests (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    plan_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    phone TEXT,
+    account_id TEXT,
+    device_id TEXT,
+    custom_users INTEGER,
+    custom_devices INTEGER,
+    notes TEXT,
+    license_id TEXT,
+    approved_by TEXT,
+    approved_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    FOREIGN KEY (license_id) REFERENCES licenses(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_subscription_requests_status ON subscription_requests(status);
+  CREATE INDEX IF NOT EXISTS idx_subscription_requests_account ON subscription_requests(account_id);
 `);
 
 // Payments table - tracks individual payment transactions
@@ -798,6 +823,33 @@ export interface IStorage {
   createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License>;
   getLicenseByDeviceId(deviceId: string): Promise<License | null>;
   linkLicenseToAccount(licenseId: string, accountId: string): Promise<void>;
+
+  // Manual subscription requests
+  createSubscriptionRequest(request: {
+    id: string;
+    status: "pending" | "approved" | "rejected";
+    planId: string;
+    email: string;
+    phone?: string | null;
+    accountId?: string | null;
+    deviceId?: string | null;
+    customUsers?: number | null;
+    customDevices?: number | null;
+    notes?: string | null;
+    licenseId?: string | null;
+    approvedBy?: string | null;
+    approvedAt?: string | null;
+    createdAt: string;
+  }): Promise<void>;
+  listSubscriptionRequests(filters?: { status?: string }): Promise<any[]>;
+  getSubscriptionRequestById(id: string): Promise<any | null>;
+  updateSubscriptionRequest(id: string, updates: Partial<{
+    status: "pending" | "approved" | "rejected";
+    notes: string | null;
+    licenseId: string | null;
+    approvedBy: string | null;
+    approvedAt: string | null;
+  }>): Promise<void>;
   
   // Suspension
   suspendHost(hostUuid: string, reason: string): Promise<void>;
@@ -2819,6 +2871,99 @@ export class SqliteStorage implements IStorage {
         blockingMessage,
       },
     };
+  }
+
+  async createSubscriptionRequest(request: {
+    id: string;
+    status: "pending" | "approved" | "rejected";
+    planId: string;
+    email: string;
+    phone?: string | null;
+    accountId?: string | null;
+    deviceId?: string | null;
+    customUsers?: number | null;
+    customDevices?: number | null;
+    notes?: string | null;
+    licenseId?: string | null;
+    approvedBy?: string | null;
+    approvedAt?: string | null;
+    createdAt: string;
+  }): Promise<void> {
+    db.prepare(`
+      INSERT INTO subscription_requests (
+        id, status, plan_id, email, phone, account_id, device_id,
+        custom_users, custom_devices, notes, license_id, approved_by, approved_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      request.id,
+      request.status,
+      request.planId,
+      request.email,
+      request.phone ?? null,
+      request.accountId ?? null,
+      request.deviceId ?? null,
+      request.customUsers ?? null,
+      request.customDevices ?? null,
+      request.notes ?? null,
+      request.licenseId ?? null,
+      request.approvedBy ?? null,
+      request.approvedAt ?? null,
+      request.createdAt,
+    );
+  }
+
+  async listSubscriptionRequests(filters?: { status?: string }): Promise<any[]> {
+    if (filters?.status) {
+      return db.prepare(
+        `SELECT * FROM subscription_requests WHERE status = ? ORDER BY created_at DESC`
+      ).all(filters.status) as any[];
+    }
+    return db.prepare(
+      `SELECT * FROM subscription_requests ORDER BY created_at DESC`
+    ).all() as any[];
+  }
+
+  async getSubscriptionRequestById(id: string): Promise<any | null> {
+    const row = db.prepare(
+      `SELECT * FROM subscription_requests WHERE id = ?`
+    ).get(id) as any;
+    return row || null;
+  }
+
+  async updateSubscriptionRequest(id: string, updates: Partial<{
+    status: "pending" | "approved" | "rejected";
+    notes: string | null;
+    licenseId: string | null;
+    approvedBy: string | null;
+    approvedAt: string | null;
+  }>): Promise<void> {
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (updates.status !== undefined) {
+      sets.push("status = ?");
+      params.push(updates.status);
+    }
+    if (updates.notes !== undefined) {
+      sets.push("notes = ?");
+      params.push(updates.notes);
+    }
+    if (updates.licenseId !== undefined) {
+      sets.push("license_id = ?");
+      params.push(updates.licenseId);
+    }
+    if (updates.approvedBy !== undefined) {
+      sets.push("approved_by = ?");
+      params.push(updates.approvedBy);
+    }
+    if (updates.approvedAt !== undefined) {
+      sets.push("approved_at = ?");
+      params.push(updates.approvedAt);
+    }
+    if (!sets.length) return;
+    params.push(id);
+    db.prepare(
+      `UPDATE subscription_requests SET ${sets.join(", ")} WHERE id = ?`
+    ).run(...params);
   }
 
   // === DEVICE-ONLY LICENSE ===

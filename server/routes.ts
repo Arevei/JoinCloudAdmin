@@ -1509,11 +1509,15 @@ export async function registerRoutes(
     }
   });
 
-  // Admin settings (payment_mode: LIVE | DEV)
+  // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic)
   app.get("/api/v1/admin/settings", async (req, res) => {
     try {
       const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
-      res.json({ payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE" });
+      const subscription_mode = storage.getSetting("subscription_mode") ?? "automatic";
+      res.json({
+        payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE",
+        subscription_mode: subscription_mode === "manual" ? "manual" : "automatic",
+      });
     } catch (err) {
       console.error("Admin settings error:", err);
       res.status(500).json({ message: "Internal Server Error" });
@@ -1537,14 +1541,291 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/v1/admin/settings/subscription-mode", async (req, res) => {
+    try {
+      const body = z.object({
+        subscription_mode: z.enum(["manual", "automatic"]),
+      }).parse(req.body);
+      storage.setSetting("subscription_mode", body.subscription_mode);
+      res.json({ subscription_mode: body.subscription_mode });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Set subscription mode error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   // Public billing mode (no auth; used by JoinCloud-Web to decide Razorpay vs DEV activate)
   app.get("/api/v1/public/billing-mode", (req, res) => {
     setCors(req, res);
     try {
       const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
-      res.json({ payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE" });
+      const subscription_mode = storage.getSetting("subscription_mode") ?? "automatic";
+      res.json({
+        payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE",
+        subscription_mode: subscription_mode === "manual" ? "manual" : "automatic",
+      });
     } catch (err) {
       console.error("Billing mode error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === MANUAL SUBSCRIPTION REQUESTS ===
+  app.post("/api/v1/subscription/requests", async (req, res) => {
+    setCors(req, res);
+    try {
+      const body = z.object({
+        plan_id: z.enum(["pro", "team", "custom"]),
+        email: z.string().email(),
+        phone: z.string().trim().min(3).max(64).optional().or(z.literal("")).optional(),
+        account_id: z.string().min(8).max(128).optional(),
+        device_id: z.string().min(8).max(128).optional(),
+        custom_users: z.number().int().nonnegative().optional(),
+        custom_devices: z.number().int().nonnegative().optional(),
+      }).parse(req.body);
+
+      const id = crypto.randomUUID();
+      const nowIso = new Date().toISOString();
+      await storage.createSubscriptionRequest({
+        id,
+        status: "pending",
+        planId: body.plan_id,
+        email: body.email,
+        phone: body.phone && body.phone.length > 0 ? body.phone : null,
+        accountId: body.account_id ?? null,
+        deviceId: body.device_id ?? null,
+        customUsers: body.custom_users ?? null,
+        customDevices: body.custom_devices ?? null,
+        notes: null,
+        licenseId: null,
+        approvedBy: null,
+        approvedAt: null,
+        createdAt: nowIso,
+      });
+
+      // Fire-and-forget emails
+      import("./mailer").then(({ sendSubscriptionRequestEmails }) => {
+        void sendSubscriptionRequestEmails({
+          planId: body.plan_id,
+          email: body.email,
+          phone: body.phone && body.phone.length > 0 ? body.phone : null,
+          accountId: body.account_id ?? null,
+          deviceId: body.device_id ?? null,
+          customUsers: body.custom_users ?? null,
+          customDevices: body.custom_devices ?? null,
+        });
+      }).catch(() => {});
+
+      res.status(201).json({ id, status: "pending" });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Create subscription request error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.get("/api/admin/subscription/requests", async (req, res) => {
+    try {
+      const status = (req.query.status as string | undefined)?.trim();
+      const filters = status ? { status } : undefined;
+      const requests = await storage.listSubscriptionRequests(filters);
+      res.json(requests);
+    } catch (err) {
+      console.error("List subscription requests error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/subscription/requests/:id/approve", async (req, res) => {
+    try {
+      const id = req.params.id;
+      const request = await storage.getSubscriptionRequestById(id);
+      if (!request) {
+        res.status(404).json({ message: "Subscription request not found" });
+        return;
+      }
+      if (request.status === "approved") {
+        res.status(400).json({ message: "Request already approved" });
+        return;
+      }
+
+      const body = z.object({
+        tier: z.enum(["pro", "teams", "custom"]).optional(),
+        device_limit: z.number().int().min(1).max(100).optional(),
+        expires_at: z.number().int().positive().optional(),
+        custom_quota: z.number().int().min(1).optional().nullable(),
+        notes: z.string().max(1000).optional().nullable(),
+      }).parse(req.body);
+
+      const tier = (body.tier ?? (request.plan_id === "team" ? "teams" : request.plan_id)) as string;
+      const deviceLimit = body.device_limit ?? (tier === "teams" ? 5 : 5);
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = body.expires_at ?? (nowSec + 365 * 24 * 60 * 60);
+
+      // Ensure account exists
+      let accountId: string;
+      if (request.account_id) {
+        accountId = request.account_id;
+      } else {
+        const existing = await storage.getAccountByEmail(request.email);
+        if (existing) {
+          accountId = existing.id;
+        } else {
+          accountId = crypto.randomUUID();
+          await storage.createAccount(accountId, request.email, ".");
+        }
+      }
+
+      const { signLicense } = await import("./license-sign");
+      let licenseId: string;
+
+      // Single license per device: if this request has a device_id, find that device's license and update it (or create one with stable ID).
+      if (request.device_id && request.device_id.length >= 8) {
+        const existingForDevice = await storage.getLicenseForHost(request.device_id);
+        if (existingForDevice) {
+          // Update the existing license for this device (same license_id, new plan)
+          licenseId = existingForDevice.id;
+          const payload = {
+            license_id: existingForDevice.id,
+            account_id: existingForDevice.accountId,
+            tier,
+            device_limit: deviceLimit,
+            issued_at: existingForDevice.issuedAt,
+            expires_at: expiresAt,
+            state: "active",
+            custom_quota: body.custom_quota ?? undefined,
+          };
+          const signature = signLicense(payload);
+          await storage.updateLicense(existingForDevice.id, {
+            tier,
+            deviceLimit,
+            expiresAt,
+            state: "active",
+            signature,
+            customQuota: body.custom_quota ?? null,
+          });
+          await storage.ensureHostRow(request.device_id);
+          await storage.addLicenseHost(existingForDevice.id, request.device_id);
+        } else {
+          // No license for this device yet: create or reuse one with stable ID (one license per device ID)
+          licenseId = "lic_" + crypto.createHash("sha256").update(request.device_id).digest("hex");
+          const existingById = await storage.getLicenseById(licenseId);
+          if (existingById) {
+            const signature = signLicense({
+              license_id: licenseId,
+              account_id: existingById.accountId,
+              tier,
+              device_limit: deviceLimit,
+              issued_at: existingById.issuedAt,
+              expires_at: expiresAt,
+              state: "active",
+              custom_quota: body.custom_quota ?? undefined,
+            });
+            await storage.updateLicense(licenseId, {
+              tier,
+              deviceLimit,
+              expiresAt,
+              state: "active",
+              signature,
+              customQuota: body.custom_quota ?? null,
+            });
+          } else {
+            const signature = signLicense({
+              license_id: licenseId,
+              account_id: accountId,
+              tier,
+              device_limit: deviceLimit,
+              issued_at: nowSec,
+              expires_at: expiresAt,
+              state: "active",
+            });
+            await storage.createLicense({
+              id: licenseId,
+              accountId,
+              tier,
+              deviceLimit,
+              issuedAt: nowSec,
+              expiresAt,
+              state: "active",
+              signature,
+              planInterval: "year",
+              graceEndsAt: null,
+              renewalAt: expiresAt,
+              customQuota: body.custom_quota ?? null,
+            });
+          }
+          await storage.ensureHostRow(request.device_id);
+          await storage.addLicenseHost(licenseId, request.device_id);
+        }
+      } else {
+        // No device_id: legacy path – expire any existing active for account, create new manual license
+        const existingActive = await storage.getActiveLicenseForAccount(accountId);
+        if (existingActive) {
+          await storage.updateLicense(existingActive.id, { state: "expired", expiresAt: nowSec });
+        }
+        licenseId = `lic_manual_${id}`;
+        const signature = signLicense({
+          license_id: licenseId,
+          account_id: accountId,
+          tier,
+          device_limit: deviceLimit,
+          issued_at: nowSec,
+          expires_at: expiresAt,
+          state: "active",
+        });
+        await storage.createLicense({
+          id: licenseId,
+          accountId,
+          tier,
+          deviceLimit,
+          issuedAt: nowSec,
+          expiresAt,
+          state: "active",
+          signature,
+          planInterval: "year",
+          graceEndsAt: null,
+          renewalAt: expiresAt,
+          customQuota: body.custom_quota ?? null,
+        });
+      }
+
+      const adminId = (req as any).user?.id ?? "admin";
+      const approvedAtIso = new Date().toISOString();
+      await storage.updateSubscriptionRequest(id, {
+        status: "approved",
+        notes: body.notes ?? request.notes ?? null,
+        licenseId,
+        approvedBy: adminId,
+        approvedAt: approvedAtIso,
+      });
+
+      // Notify user of license grant
+      import("./mailer").then(({ sendLicenseGrantEmail }) => {
+        void sendLicenseGrantEmail({
+          to: request.email,
+          tier,
+          licenseId,
+          deviceLimit,
+          expiresAt,
+          customQuota: body.custom_quota ?? null,
+        });
+      }).catch(() => {});
+
+      const updated = await storage.getSubscriptionRequestById(id);
+      res.json(updated);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Approve subscription request error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
@@ -1562,7 +1843,14 @@ export async function registerRoutes(
 
   app.get("/api/admin/accounts-with-billing", async (req, res) => {
     try {
-      const accounts = await storage.listAccountsWithBilling();
+      const includeDeviceAccounts =
+        typeof req.query?.include_device_accounts === "string" &&
+        ["1", "true", "yes"].includes(String(req.query.include_device_accounts).toLowerCase());
+      let accounts = await storage.listAccountsWithBilling();
+      if (!includeDeviceAccounts) {
+        // Hide device-only placeholder accounts (created for device-id based trials).
+        accounts = accounts.filter((a) => !(a?.email && String(a.email).toLowerCase().endsWith("@device.local")));
+      }
       res.json(accounts);
     } catch (err) {
       console.error("Accounts with billing error:", err);
