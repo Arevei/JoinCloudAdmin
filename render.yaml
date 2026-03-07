@@ -18,10 +18,9 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # Optional: override SQLite path (default: ./data/telemetry.db)
-      # - key: JOINCLOUD_CONTROL_PLANE_DB_PATH
-      #   sync: false
-    # Optional: mount persistent disk for SQLite (Render Disks)
-    # disk:
-    #   name: joincloud-data
-    #   mountPath: /opt/render/project/src/data
+      - key: DATABASE_URL
+        sync: false
+      # JWT_SECRET, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, STRIPE_SECRET_KEY,
+      # STRIPE_WEBHOOK_SECRET, RAZORPAY_WEBHOOK_SECRET, SMTP_HOST, SMTP_PORT,
+      # SMTP_USER, SMTP_PASS, MAIL_FROM, JOINCLOUD_WEB_URL,
+      # JOINCLOUD_ACTIVATION_SECRET — set these in the Render dashboard.

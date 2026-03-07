@@ -560,7 +560,7 @@ export async function registerRoutes(
         res.status(401).json({ message: "Invalid email or password" });
         return;
       }
-      const passwordHash = storage.getPasswordHash(account.id);
+      const passwordHash = await storage.getPasswordHash(account.id);
       if (!passwordHash) {
         res.status(401).json({ message: "Invalid email or password" });
         return;
@@ -634,7 +634,7 @@ export async function registerRoutes(
         }
       }
 
-      const canExtend = storage.canExtendDeviceTrial(deviceId);
+      const canExtend = await storage.canExtendDeviceTrial(deviceId);
       const entitlements = resolveEntitlementsByState(
         isExpired ? "EXPIRED" : "TRIAL",
         "FREE",
@@ -793,11 +793,11 @@ export async function registerRoutes(
 
   // === TRIAL EXTEND TOKEN (auth required) ===
   const trialExtendTokens = new Map<string, { deviceId: string; expiresAt: number }>();
-  app.post("/api/v1/trial/extend-token", requireAuth, (req, res) => {
+  app.post("/api/v1/trial/extend-token", requireAuth, async (req, res) => {
     setCors(req, res);
     try {
       const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
-      if (!storage.canExtendDeviceTrial(deviceId)) {
+      if (!await storage.canExtendDeviceTrial(deviceId)) {
         res.status(400).json({ message: "Trial already extended or not found" });
         return;
       }
@@ -925,7 +925,7 @@ export async function registerRoutes(
         }
 
         if (license) {
-          const hostCount = storage.getLicenseHostsCount(license.id);
+          const hostCount = await storage.getLicenseHostsCount(license.id);
           if (hostCount >= license.deviceLimit) {
             res.status(403).json({
               code: "DEVICE_LIMIT_REACHED",
@@ -939,7 +939,7 @@ export async function registerRoutes(
 
       // If this is a trial license and can be extended, extend to 14 days total
       if (license && license.tier.toLowerCase() === 'trial' && license.state === 'trial_active') {
-        if (storage.canExtendDeviceTrial(deviceId)) {
+        if (await storage.canExtendDeviceTrial(deviceId)) {
           try {
             await storage.extendDeviceTrial(deviceId, 7); // Extend by 7 more days (7+7=14 total)
             // Update license expiration
@@ -1032,7 +1032,7 @@ export async function registerRoutes(
         return;
       }
 
-      if (storage.isDeviceTrialUsed(host_uuid)) {
+      if (await storage.isDeviceTrialUsed(host_uuid)) {
         res.status(403).json({
           code: "TRIAL_ALREADY_USED",
           message: "This device has already used its trial. Please upgrade to Pro.",
@@ -1067,8 +1067,9 @@ export async function registerRoutes(
         signature,
       });
       await storage.addLicenseHost(licenseId, host_uuid);
-      storage.setDeviceTrialUsed(host_uuid);
+      await storage.setDeviceTrialUsed(host_uuid);
       license = await storage.getLicenseById(licenseId)!;
+      if (!license) throw new Error("License not found after creation");
       const signedPayload: Record<string, unknown> = {
         license_id: license.id,
         account_id: license.accountId,
@@ -1150,7 +1151,7 @@ export async function registerRoutes(
         return;
       }
 
-      const count = storage.getLicenseHostsCount(license.id);
+      const count = await storage.getLicenseHostsCount(license.id);
       if (count >= license.deviceLimit) {
         res.status(403).json({
           code: "DEVICE_LIMIT_REACHED",
@@ -1191,7 +1192,7 @@ export async function registerRoutes(
   app.post("/api/v1/dev/activate-plan", requireAuth, async (req, res) => {
     setCors(req, res);
     try {
-      const paymentMode = storage.getSetting("payment_mode") ?? "LIVE";
+      const paymentMode = await storage.getSetting("payment_mode") ?? "LIVE";
       if (paymentMode !== "DEV") {
         res.status(403).json({ message: "DEV activation is only available when payment_mode is DEV" });
         return;
@@ -1238,7 +1239,7 @@ export async function registerRoutes(
         await storage.updateLicense(existingLicense.id, { tier, deviceLimit, expiresAt: payload.expires_at, signature: newSig });
         if (body.deviceId && body.deviceId.length >= 8 && body.deviceId.length <= 128) {
           await storage.ensureHostRow(body.deviceId);
-          const count = storage.getLicenseHostsCount(existingLicense.id);
+          const count = await storage.getLicenseHostsCount(existingLicense.id);
           if (count < deviceLimit) {
             try { await storage.addLicenseHost(existingLicense.id, body.deviceId); } catch (_) { /* already linked */ }
           }
@@ -1286,9 +1287,9 @@ export async function registerRoutes(
           issued_at: body.license.issued_at,
           expires_at: body.license.expires_at,
           state: body.license.state,
-          grace_ends_at: body.license.grace_ends_at,
+          grace_ends_at: body.license.grace_ends_at ?? undefined,
           features: body.license.features,
-          custom_quota: body.license.custom_quota,
+          custom_quota: body.license.custom_quota ?? undefined,
         },
         body.license.signature
       );
@@ -1301,7 +1302,7 @@ export async function registerRoutes(
         res.json({ valid: false, state: "REVOKED" });
         return;
       }
-      if (!storage.isHostInLicense(body.license.license_id, body.host_uuid)) {
+      if (!await storage.isHostInLicense(body.license.license_id, body.host_uuid)) {
         res.json({ valid: false, state: "REVOKED" });
         return;
       }
@@ -1512,8 +1513,8 @@ export async function registerRoutes(
   // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic)
   app.get("/api/v1/admin/settings", async (req, res) => {
     try {
-      const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
-      const subscription_mode = storage.getSetting("subscription_mode") ?? "automatic";
+      const payment_mode = await storage.getSetting("payment_mode") ?? "LIVE";
+      const subscription_mode = await storage.getSetting("subscription_mode") ?? "automatic";
       res.json({
         payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE",
         subscription_mode: subscription_mode === "manual" ? "manual" : "automatic",
@@ -1529,7 +1530,7 @@ export async function registerRoutes(
       const body = z.object({
         payment_mode: z.enum(["LIVE", "DEV"]),
       }).parse(req.body);
-      storage.setSetting("payment_mode", body.payment_mode);
+      await storage.setSetting("payment_mode", body.payment_mode);
       res.json({ payment_mode: body.payment_mode });
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -1546,7 +1547,7 @@ export async function registerRoutes(
       const body = z.object({
         subscription_mode: z.enum(["manual", "automatic"]),
       }).parse(req.body);
-      storage.setSetting("subscription_mode", body.subscription_mode);
+      await storage.setSetting("subscription_mode", body.subscription_mode);
       res.json({ subscription_mode: body.subscription_mode });
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -1559,11 +1560,11 @@ export async function registerRoutes(
   });
 
   // Public billing mode (no auth; used by JoinCloud-Web to decide Razorpay vs DEV activate)
-  app.get("/api/v1/public/billing-mode", (req, res) => {
+  app.get("/api/v1/public/billing-mode", async (req, res) => {
     setCors(req, res);
     try {
-      const payment_mode = storage.getSetting("payment_mode") ?? "LIVE";
-      const subscription_mode = storage.getSetting("subscription_mode") ?? "automatic";
+      const payment_mode = await storage.getSetting("payment_mode") ?? "LIVE";
+      const subscription_mode = await storage.getSetting("subscription_mode") ?? "automatic";
       res.json({
         payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE",
         subscription_mode: subscription_mode === "manual" ? "manual" : "automatic",
@@ -1575,6 +1576,26 @@ export async function registerRoutes(
   });
 
   // === MANUAL SUBSCRIPTION REQUESTS ===
+
+  function normalizeSubscriptionRequest(r: any) {
+    return {
+      id: r.id,
+      status: r.status,
+      plan_id: r.planId ?? r.plan_id,
+      email: r.email,
+      phone: r.phone ?? null,
+      account_id: r.accountId ?? r.account_id ?? null,
+      device_id: r.deviceId ?? r.device_id ?? null,
+      custom_users: r.customUsers ?? r.custom_users ?? null,
+      custom_devices: r.customDevices ?? r.custom_devices ?? null,
+      notes: r.notes ?? null,
+      license_id: r.licenseId ?? r.license_id ?? null,
+      approved_by: r.approvedBy ?? r.approved_by ?? null,
+      approved_at: r.approvedAt ?? r.approved_at ?? null,
+      created_at: r.createdAt ?? r.created_at,
+    };
+  }
+
   app.post("/api/v1/subscription/requests", async (req, res) => {
     setCors(req, res);
     try {
@@ -1636,7 +1657,7 @@ export async function registerRoutes(
       const status = (req.query.status as string | undefined)?.trim();
       const filters = status ? { status } : undefined;
       const requests = await storage.listSubscriptionRequests(filters);
-      res.json(requests);
+      res.json(requests.map(normalizeSubscriptionRequest));
     } catch (err) {
       console.error("List subscription requests error:", err);
       res.status(500).json({ message: "Internal Server Error" });
@@ -1646,11 +1667,12 @@ export async function registerRoutes(
   app.post("/api/admin/subscription/requests/:id/approve", async (req, res) => {
     try {
       const id = req.params.id;
-      const request = await storage.getSubscriptionRequestById(id);
-      if (!request) {
+      const rawRequest = await storage.getSubscriptionRequestById(id);
+      if (!rawRequest) {
         res.status(404).json({ message: "Subscription request not found" });
         return;
       }
+      const request = normalizeSubscriptionRequest(rawRequest);
       if (request.status === "approved") {
         res.status(400).json({ message: "Request already approved" });
         return;
@@ -1756,9 +1778,9 @@ export async function registerRoutes(
               state: "active",
               signature,
               planInterval: "year",
-              graceEndsAt: null,
+              graceEndsAt: undefined,
               renewalAt: expiresAt,
-              customQuota: body.custom_quota ?? null,
+              customQuota: body.custom_quota ?? undefined,
             });
           }
           await storage.ensureHostRow(request.device_id);
@@ -1790,9 +1812,9 @@ export async function registerRoutes(
           state: "active",
           signature,
           planInterval: "year",
-          graceEndsAt: null,
+          graceEndsAt: undefined,
           renewalAt: expiresAt,
-          customQuota: body.custom_quota ?? null,
+          customQuota: body.custom_quota ?? undefined,
         });
       }
 
@@ -1819,7 +1841,7 @@ export async function registerRoutes(
       }).catch(() => {});
 
       const updated = await storage.getSubscriptionRequestById(id);
-      res.json(updated);
+      res.json(updated ? normalizeSubscriptionRequest(updated) : null);
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -1829,6 +1851,53 @@ export async function registerRoutes(
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
+
+  // Device-side: claim an approved license by host_uuid (no sign-in required).
+  // Matches requests that were approved and already have the host in license_hosts (device_id path),
+  // or registers the host into the approved license if the request's device_id matches.
+  app.post("/api/v1/license/claim", async (req, res) => {
+    setCors(req, res);
+    try {
+      const body = z.object({
+        host_uuid: z.string().min(8).max(128),
+      }).parse(req.body);
+
+      const { host_uuid } = body;
+
+      // Already activated?
+      const existing = await storage.getLicenseForHost(host_uuid);
+      if (existing && existing.state === "active") {
+        res.json({ success: true, already_active: true });
+        return;
+      }
+
+      // Find an approved subscription request whose device_id matches this host_uuid
+      const allApproved = (await storage.listSubscriptionRequests({ status: "approved" })).map(normalizeSubscriptionRequest);
+      const matchingRequest = allApproved.find(
+        (r) => r.device_id === host_uuid && r.license_id
+      );
+
+      if (!matchingRequest) {
+        res.json({ success: false, reason: "no_approved_request" });
+        return;
+      }
+
+      const licenseId: string = matchingRequest.license_id!;
+      await storage.ensureHostRow(host_uuid);
+      await storage.addLicenseHost(licenseId, host_uuid);
+
+      res.json({ success: true });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("License claim error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.options("/api/v1/license/claim", (req, res) => { setCors(req, res); res.sendStatus(204); });
 
   // === ADMIN: BILLING & SUBSCRIPTIONS ===
   app.get("/api/admin/billing/summary", async (req, res) => {
@@ -1942,7 +2011,7 @@ export async function registerRoutes(
       }
       
       // Check team size limit
-      const userCount = storage.getTeamsLicenseUserCount(licenseId);
+      const userCount = await storage.getTeamsLicenseUserCount(licenseId);
       if (userCount >= 5) {
         res.status(400).json({ message: "Team has reached maximum 5 users" });
         return;
@@ -2297,7 +2366,7 @@ export async function registerRoutes(
         res.status(400).json({ message: "No active Teams license found for this email" });
         return;
       }
-      const userCount = storage.getTeamsLicenseUserCount(license.id);
+      const userCount = await storage.getTeamsLicenseUserCount(license.id);
       if (userCount >= 5) {
         res.status(400).json({ message: "Teams license already has maximum 5 users" });
         return;
@@ -2628,7 +2697,7 @@ export async function registerRoutes(
         res.status(403).json({ message: "Device removal is only available for Pro and Teams licenses." });
         return;
       }
-      if (!storage.isHostInLicense(licenseId, hostUuid)) {
+      if (!await storage.isHostInLicense(licenseId, hostUuid)) {
         res.status(404).json({ message: "Device not found on this license." });
         return;
       }
@@ -2647,7 +2716,7 @@ export async function registerRoutes(
         res.status(400).json({ message: "Invalid host UUID" });
         return;
       }
-      storage.setLogoutRequested(hostUuid);
+      await storage.setLogoutRequested(hostUuid);
       res.json({ success: true, message: "Device will be signed out on next config check." });
     } catch (err) {
       console.error("Device logout request error:", err);
@@ -2659,7 +2728,7 @@ export async function registerRoutes(
   app.get("/api/v1/config", async (req, res) => {
     try {
       const hostUuid = (req.query.host_uuid as string) || (req.headers["x-host-uuid"] as string);
-      const logoutRequested = hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128 && storage.consumeLogoutRequested(hostUuid);
+      const logoutRequested = hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128 && await storage.consumeLogoutRequested(hostUuid);
       let license = null;
       if (hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128) {
         license = await storage.getLicenseForHost(hostUuid);
@@ -2700,7 +2769,7 @@ export async function registerRoutes(
         displayName = isDeviceOnly ? "Join" : (account?.username ? `Join ${account.username}` : (account?.email ? `Join ${account.email.split("@")[0]}` : "Join"));
       } catch (_) {}
       const tier = (license.tier || "free").toLowerCase();
-      const canExtendTrial = hostUuid ? storage.canExtendDeviceTrial(hostUuid) : false;
+      const canExtendTrial = hostUuid ? await storage.canExtendDeviceTrial(hostUuid) : false;
       const entitlements = resolveEntitlementsByState(
         state,
         tier,
@@ -2838,7 +2907,7 @@ export async function registerRoutes(
         res.status(401).json({ message: "Invalid email or password" });
         return;
       }
-      const passwordHash = storage.getPasswordHash(account.id);
+      const passwordHash = await storage.getPasswordHash(account.id);
       if (!passwordHash) {
         res.status(401).json({ message: "Invalid email or password" });
         return;
@@ -2880,7 +2949,7 @@ export async function registerRoutes(
         res.status(401).json({ message: "Invalid email or password" });
         return;
       }
-      const passwordHash = storage.getPasswordHash(account.id);
+      const passwordHash = await storage.getPasswordHash(account.id);
       if (!passwordHash) {
         res.status(401).json({ message: "Invalid email or password" });
         return;
@@ -2924,7 +2993,7 @@ export async function registerRoutes(
         res.status(401).json({ message: "Invalid email or password" });
         return;
       }
-      const passwordHash = storage.getPasswordHash(primaryAccount.id);
+      const passwordHash = await storage.getPasswordHash(primaryAccount.id);
       if (!passwordHash) {
         res.status(401).json({ message: "Invalid email or password" });
         return;
@@ -2939,7 +3008,7 @@ export async function registerRoutes(
         res.status(400).json({ message: "No active Teams license found for this account" });
         return;
       }
-      const userCount = storage.getTeamsLicenseUserCount(license.id);
+      const userCount = await storage.getTeamsLicenseUserCount(license.id);
       if (userCount >= 5) {
         res.status(400).json({ message: "Teams license already has maximum 5 users" });
         return;
@@ -2989,7 +3058,7 @@ export async function registerRoutes(
         res.status(401).json({ message: "Invalid email or password" });
         return;
       }
-      const passwordHash = storage.getPasswordHash(primaryAccount.id);
+      const passwordHash = await storage.getPasswordHash(primaryAccount.id);
       if (!passwordHash) {
         res.status(401).json({ message: "Invalid email or password" });
         return;
