@@ -395,6 +395,7 @@ export async function registerRoutes(
   app.options("/api/v1/devices/bootstrap-trial", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/devices/usage/shares/increment", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/trial/extend-token", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/subscription/requests", (req, res) => { setCors(req, res); res.sendStatus(204); });
 
   // === PHASE 2: AUTH ===
   app.post("/api/v1/auth/register", authRateLimit, async (req, res) => {
@@ -608,7 +609,7 @@ export async function registerRoutes(
           }
           const nowSec = Math.floor(Date.now() / 1000);
           const expiresAt = Math.floor(trialEnds.getTime() / 1000);
-          const licenseId = `lic_trial_${deviceId}`;
+          const licenseId = await storage.getNextLicenseId();
           const { signLicense } = await import("./license-sign");
           const signature = signLicense({
             license_id: licenseId,
@@ -707,30 +708,24 @@ export async function registerRoutes(
           // Create device-only trial license
           const nowSec = Math.floor(Date.now() / 1000);
           const expiresAt = Math.floor(trialEnds.getTime() / 1000);
-          const licenseId = `lic_trial_${deviceId}`;
-          
-          // Check if license with this ID already exists
-          const existingLicense = await storage.getLicenseById(licenseId);
-          if (!existingLicense) {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: deviceId,
-              tier: "TRIAL",
-              device_limit: 1,
-              issued_at: nowSec,
-              expires_at: expiresAt,
-              state: "trial_active",
-            });
-            
-            license = await storage.createDeviceOnlyLicense(
-              deviceId,
-              "TRIAL",
-              expiresAt,
-              signature
-            );
-          } else {
-            license = existingLicense;
-          }
+          const licenseId = await storage.getNextLicenseId();
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: deviceId,
+            tier: "TRIAL",
+            device_limit: 1,
+            issued_at: nowSec,
+            expires_at: expiresAt,
+            state: "trial_active",
+          });
+
+          license = await storage.createDeviceOnlyLicense(
+            deviceId,
+            "TRIAL",
+            expiresAt,
+            signature,
+            licenseId
+          );
         }
       }
 
@@ -898,7 +893,7 @@ export async function registerRoutes(
 
         if (!license && !account.trialUsed) {
           const now = Math.floor(Date.now() / 1000);
-          const licenseId = `LIC-${Date.now()}-${accountId.slice(0, 8)}`;
+          const licenseId = await storage.getNextLicenseId();
           const payload = {
             license_id: licenseId,
             account_id: accountId,
@@ -1041,7 +1036,7 @@ export async function registerRoutes(
       }
 
       await storage.ensureDeviceAccount(host_uuid);
-      const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const issuedAt = now;
       const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
       const state = "trial_active";
@@ -1110,7 +1105,7 @@ export async function registerRoutes(
 
       if (!license) {
         if (!account.trialUsed) {
-          const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+          const licenseId = await storage.getNextLicenseId();
           const issuedAt = Math.floor(Date.now() / 1000);
           const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
           const state = "trial_active";
@@ -1211,7 +1206,7 @@ export async function registerRoutes(
       const now = Math.floor(Date.now() / 1000);
       const PAID_PLAN_DAYS = 30;
       const expiresAt = now + PAID_PLAN_DAYS * 24 * 3600; // 30 days from now
-      const licenseId = `LIC-${Date.now()}-${auth.accountId.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
         account_id: auth.accountId,
@@ -1401,7 +1396,7 @@ export async function registerRoutes(
       const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 30 * 24 * 3600;
       let license = await storage.getActiveLicenseForAccount(account_id);
-      const licenseId = license?.id ?? `LIC-${Date.now()}-${razorpay_payment_id.slice(-8)}`;
+      const licenseId = license?.id ?? await storage.getNextLicenseId();
       const tierName = plan ?? "pro";
       const limit = device_limit ? Math.max(1, parseInt(device_limit, 10) || proLimit) : proLimit;
       const payload = {
@@ -1736,53 +1731,31 @@ export async function registerRoutes(
           await storage.ensureHostRow(request.device_id);
           await storage.addLicenseHost(existingForDevice.id, request.device_id);
         } else {
-          // No license for this device yet: create or reuse one with stable ID (one license per device ID)
-          licenseId = "lic_" + crypto.createHash("sha256").update(request.device_id).digest("hex");
-          const existingById = await storage.getLicenseById(licenseId);
-          if (existingById) {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: existingById.accountId,
-              tier,
-              device_limit: deviceLimit,
-              issued_at: existingById.issuedAt,
-              expires_at: expiresAt,
-              state: "active",
-              custom_quota: body.custom_quota ?? undefined,
-            });
-            await storage.updateLicense(licenseId, {
-              tier,
-              deviceLimit,
-              expiresAt,
-              state: "active",
-              signature,
-              customQuota: body.custom_quota ?? null,
-            });
-          } else {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: accountId,
-              tier,
-              device_limit: deviceLimit,
-              issued_at: nowSec,
-              expires_at: expiresAt,
-              state: "active",
-            });
-            await storage.createLicense({
-              id: licenseId,
-              accountId,
-              tier,
-              deviceLimit,
-              issuedAt: nowSec,
-              expiresAt,
-              state: "active",
-              signature,
-              planInterval: "year",
-              graceEndsAt: undefined,
-              renewalAt: expiresAt,
-              customQuota: body.custom_quota ?? undefined,
-            });
-          }
+          // No license for this device yet: create a fresh sequential license ID.
+          licenseId = await storage.getNextLicenseId();
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: accountId,
+            tier,
+            device_limit: deviceLimit,
+            issued_at: nowSec,
+            expires_at: expiresAt,
+            state: "active",
+          });
+          await storage.createLicense({
+            id: licenseId,
+            accountId,
+            tier,
+            deviceLimit,
+            issuedAt: nowSec,
+            expiresAt,
+            state: "active",
+            signature,
+            planInterval: "year",
+            graceEndsAt: undefined,
+            renewalAt: expiresAt,
+            customQuota: body.custom_quota ?? undefined,
+          });
           await storage.ensureHostRow(request.device_id);
           await storage.addLicenseHost(licenseId, request.device_id);
         }
@@ -1792,7 +1765,7 @@ export async function registerRoutes(
         if (existingActive) {
           await storage.updateLicense(existingActive.id, { state: "expired", expiresAt: nowSec });
         }
-        licenseId = `lic_manual_${id}`;
+        licenseId = await storage.getNextLicenseId();
         const signature = signLicense({
           license_id: licenseId,
           account_id: accountId,
@@ -2043,20 +2016,11 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         tier: z.enum(["pro", "teams"]),
       }).parse(req.body);
-      let account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        const id = crypto.randomUUID();
-        await storage.createAccount(id, body.email, ".");
-        account = await storage.getAccountById(id);
-        if (!account) {
-          res.status(500).json({ message: "Failed to create account" });
-          return;
-        }
-      }
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const now = Math.floor(Date.now() / 1000);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         res.status(200).json({
           alreadyHasLicense: true,
@@ -2067,12 +2031,11 @@ export async function registerRoutes(
         return;
       }
       const deviceLimit = body.tier === "teams" ? 5 : 5;
-      const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 365 * 24 * 3600;
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: body.tier,
         device_limit: deviceLimit,
         issued_at: now,
@@ -2081,9 +2044,11 @@ export async function registerRoutes(
         features: { smart_workspaces: true, activity_feed: true },
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: body.tier,
         deviceLimit,
         issuedAt: now,
@@ -2091,8 +2056,8 @@ export async function registerRoutes(
         state: "active",
         signature,
       });
-      sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId, deviceLimit, expiresAt }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2106,22 +2071,17 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-replace", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         tier: z.enum(["pro", "teams"]),
       }).parse(req.body);
-      const account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        res.status(404).json({ message: "Account not found" });
-        return;
-      }
       const deviceLimit = body.tier === "teams" ? 5 : 5;
       const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 365 * 24 * 3600;
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         const payload = {
           license_id: existingLicense.id,
-          account_id: existingLicense.accountId,
+          account_id: body.deviceId,
           tier: body.tier,
           device_limit: deviceLimit,
           issued_at: existingLicense.issuedAt,
@@ -2130,15 +2090,17 @@ export async function registerRoutes(
           features: { smart_workspaces: true, activity_feed: true },
         };
         const signature = signLicense(payload);
+        await storage.ensureDeviceAccount(body.deviceId);
+        await storage.ensureHostRow(body.deviceId);
         await storage.updateLicense(existingLicense.id, { tier: body.tier, deviceLimit, expiresAt, signature });
-        sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId: existingLicense.id, deviceLimit, expiresAt }).catch(() => {});
-        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: account.id, email: account.email });
+        await storage.addLicenseHost(existingLicense.id, body.deviceId);
+        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: body.deviceId, deviceId: body.deviceId });
         return;
       }
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: body.tier,
         device_limit: deviceLimit,
         issued_at: now,
@@ -2147,9 +2109,11 @@ export async function registerRoutes(
         features: { smart_workspaces: true, activity_feed: true },
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: body.tier,
         deviceLimit,
         issuedAt: now,
@@ -2157,8 +2121,8 @@ export async function registerRoutes(
         state: "active",
         signature,
       });
-      sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId, deviceLimit, expiresAt }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2172,21 +2136,11 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-custom", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         usersOrStorage: z.number().int().min(1).max(1000),
         pairingDevices: z.number().int().min(1).max(100),
       }).parse(req.body);
-      let account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        const id = crypto.randomUUID();
-        await storage.createAccount(id, body.email, ".");
-        account = await storage.getAccountById(id);
-        if (!account) {
-          res.status(500).json({ message: "Failed to create account" });
-          return;
-        }
-      }
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         res.status(200).json({
           alreadyHasLicense: true,
@@ -2198,10 +2152,10 @@ export async function registerRoutes(
       }
       const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 365 * 24 * 3600;
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: "custom",
         device_limit: body.pairingDevices,
         issued_at: now,
@@ -2211,9 +2165,11 @@ export async function registerRoutes(
         custom_quota: body.usersOrStorage,
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: "custom",
         deviceLimit: body.pairingDevices,
         issuedAt: now,
@@ -2222,15 +2178,8 @@ export async function registerRoutes(
         signature,
         customQuota: body.usersOrStorage,
       });
-      sendLicenseGrantEmail({
-        to: account.email,
-        tier: "custom",
-        licenseId,
-        deviceLimit: body.pairingDevices,
-        expiresAt,
-        customQuota: body.usersOrStorage,
-      }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2244,22 +2193,17 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-custom-replace", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         usersOrStorage: z.number().int().min(1).max(1000),
         pairingDevices: z.number().int().min(1).max(100),
       }).parse(req.body);
-      const account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        res.status(404).json({ message: "Account not found" });
-        return;
-      }
       const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 365 * 24 * 3600;
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         const payload = {
           license_id: existingLicense.id,
-          account_id: existingLicense.accountId,
+          account_id: body.deviceId,
           tier: "custom",
           device_limit: body.pairingDevices,
           issued_at: existingLicense.issuedAt,
@@ -2269,6 +2213,8 @@ export async function registerRoutes(
           custom_quota: body.usersOrStorage,
         };
         const signature = signLicense(payload);
+        await storage.ensureDeviceAccount(body.deviceId);
+        await storage.ensureHostRow(body.deviceId);
         await storage.updateLicense(existingLicense.id, {
           tier: "custom",
           deviceLimit: body.pairingDevices,
@@ -2276,21 +2222,14 @@ export async function registerRoutes(
           signature,
           customQuota: body.usersOrStorage,
         });
-        sendLicenseGrantEmail({
-          to: account.email,
-          tier: "custom",
-          licenseId: existingLicense.id,
-          deviceLimit: body.pairingDevices,
-          expiresAt,
-          customQuota: body.usersOrStorage,
-        }).catch(() => {});
-        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: account.id, email: account.email });
+        await storage.addLicenseHost(existingLicense.id, body.deviceId);
+        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: body.deviceId, deviceId: body.deviceId });
         return;
       }
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: "custom",
         device_limit: body.pairingDevices,
         issued_at: now,
@@ -2300,9 +2239,11 @@ export async function registerRoutes(
         custom_quota: body.usersOrStorage,
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: "custom",
         deviceLimit: body.pairingDevices,
         issuedAt: now,
@@ -2311,15 +2252,8 @@ export async function registerRoutes(
         signature,
         customQuota: body.usersOrStorage,
       });
-      sendLicenseGrantEmail({
-        to: account.email,
-        tier: "custom",
-        licenseId,
-        deviceLimit: body.pairingDevices,
-        expiresAt,
-        customQuota: body.usersOrStorage,
-      }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2433,6 +2367,51 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (err) {
       console.error("Revoke license error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/licenses/:licenseId/unrevoke", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      let restoredState: "trial_active" | "active" | "grace" | "expired";
+      if (license.expiresAt <= now) {
+        restoredState = "expired";
+      } else if (license.graceEndsAt && license.graceEndsAt > now) {
+        restoredState = "grace";
+      } else if (license.tier === "trial") {
+        restoredState = "trial_active";
+      } else {
+        restoredState = "active";
+      }
+
+      const payload = {
+        license_id: license.id,
+        account_id: license.accountId,
+        tier: license.tier,
+        device_limit: license.deviceLimit,
+        issued_at: license.issuedAt,
+        expires_at: license.expiresAt,
+        state: restoredState,
+        grace_ends_at: license.graceEndsAt ?? undefined,
+        features: { smart_workspaces: true, activity_feed: true },
+      };
+      const signature = signLicense(payload);
+      await storage.updateLicense(licenseId, {
+        state: restoredState,
+        signature,
+      });
+
+      res.json({ success: true, state: restoredState });
+    } catch (err) {
+      console.error("Unrevoke license error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });

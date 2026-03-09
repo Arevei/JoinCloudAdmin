@@ -68,7 +68,7 @@ async function applySubscriptionToLicense(
 
   let license = await storage.getActiveLicenseForAccount(accountId);
   const now = Math.floor(Date.now() / 1000);
-  const licenseId = license?.id ?? `LIC-${Date.now()}-${subscription.id.slice(-8)}`;
+  const licenseId = license?.id ?? await storage.getNextLicenseId();
   const issuedAt = license?.issuedAt ?? now;
 
   const payload = {

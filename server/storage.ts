@@ -327,6 +327,7 @@ export interface IStorage {
   getPasswordHash(accountId: string): Promise<string | null>;
   setAccountTrialUsed(accountId: string): Promise<void>;
   createLicense(license: { id: string; accountId: string; tier: string; deviceLimit: number; issuedAt: number; expiresAt: number; state: string; signature: string; planInterval?: string; graceEndsAt?: number; renewalAt?: number; customQuota?: number }): Promise<License>;
+  getNextLicenseId(): Promise<string>;
   updateLicense(licenseId: string, updates: { state?: string; expiresAt?: number; signature?: string; planInterval?: string; graceEndsAt?: number | null; renewalAt?: number | null; deviceLimit?: number; tier?: string; customQuota?: number | null }): Promise<void>;
   getActiveLicenseForAccount(accountId: string): Promise<License | null>;
   getLatestLicenseForAccount(accountId: string): Promise<License | null>;
@@ -381,7 +382,7 @@ export interface IStorage {
   updateAccountReferral(accountId: string, updates: { referralCode?: string; referredBy?: string; referralCount?: number; referralDaysEarned?: number }): Promise<void>;
   getReferralStats(accountId: string): Promise<ReferralStats>;
   getLicenseCheckResponse(deviceId: string): Promise<LicenseCheckResponse>;
-  createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License>;
+  createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string, licenseId?: string): Promise<License>;
   getLicenseByDeviceId(deviceId: string): Promise<License | null>;
   linkLicenseToAccount(licenseId: string, accountId: string): Promise<void>;
   createSubscriptionRequest(request: {
@@ -1602,6 +1603,24 @@ export class DrizzleStorage implements IStorage {
 
   // === LICENSES ===
 
+  async getNextLicenseId(): Promise<string> {
+    const result = await db.execute(sql`
+      INSERT INTO app_settings ("key", value)
+      VALUES ('license_serial_counter', '1')
+      ON CONFLICT ("key")
+      DO UPDATE SET value = (
+        CASE
+          WHEN app_settings.value ~ '^[0-9]+$' THEN CAST(app_settings.value AS integer)
+          ELSE 0
+        END + 1
+      )::text
+      RETURNING value
+    `);
+    const nextValue = Number((((result.rows[0] || {}) as { value?: string }).value) ?? 1);
+
+    return `LC_${String(nextValue).padStart(11, "0")}`;
+  }
+
   async createLicense(license: { id: string; accountId: string; tier: string; deviceLimit: number; issuedAt: number; expiresAt: number; state: string; signature: string; planInterval?: string; graceEndsAt?: number; renewalAt?: number; customQuota?: number }): Promise<License> {
     const now = new Date().toISOString();
     await db.insert(licenses).values({
@@ -1858,16 +1877,15 @@ export class DrizzleStorage implements IStorage {
 
   // === DEVICE-ONLY LICENSE ===
 
-  async createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License> {
-    const { randomUUID } = await import('crypto');
+  async createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string, licenseId?: string): Promise<License> {
     const now = new Date().toISOString();
     const nowUnix = Math.floor(Date.now() / 1000);
-    const licenseId = randomUUID();
+    const resolvedLicenseId = licenseId ?? await this.getNextLicenseId();
 
     await this.ensureDeviceAccount(deviceId);
 
     await db.insert(licenses).values({
-      id: licenseId,
+      id: resolvedLicenseId,
       accountId: deviceId,
       tier,
       deviceLimit: 1,
@@ -1880,9 +1898,9 @@ export class DrizzleStorage implements IStorage {
       isDeviceOnly: 1,
     });
 
-    await this.addLicenseHost(licenseId, deviceId);
+    await this.addLicenseHost(resolvedLicenseId, deviceId);
 
-    const rows = await db.select().from(licenses).where(eq(licenses.id, licenseId)).limit(1);
+    const rows = await db.select().from(licenses).where(eq(licenses.id, resolvedLicenseId)).limit(1);
     return mapLicenseRow(rows[0]);
   }
 

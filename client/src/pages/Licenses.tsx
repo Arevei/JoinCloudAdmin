@@ -77,12 +77,12 @@ export default function Licenses() {
   const [extendId, setExtendId] = useState<string | null>(null);
   const [extendDays, setExtendDays] = useState(30);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [grantEmail, setGrantEmail] = useState("");
+  const [grantDeviceId, setGrantDeviceId] = useState("");
   const [grantTier, setGrantTier] = useState<"pro" | "teams" | "custom">("pro");
   const [customUsersOrStorage, setCustomUsersOrStorage] = useState(5);
   const [customPairingDevices, setCustomPairingDevices] = useState(5);
   const [replaceModal, setReplaceModal] = useState<{
-    email: string;
+    deviceId: string;
     tier: "pro" | "teams" | "custom";
     licenseId: string;
     existingTier: string;
@@ -155,6 +155,22 @@ export default function Licenses() {
     onError: () => toast({ title: "Failed to revoke", variant: "destructive" }),
   });
 
+  const unrevokeMutation = useMutation({
+    mutationFn: async (licenseId: string) => {
+      const res = await fetch(`/api/admin/licenses/${licenseId}/unrevoke`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || "Failed to unrevoke");
+      return data as { state?: string };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
+      toast({ title: `License restored${data.state ? ` as ${data.state}` : ""}` });
+    },
+    onError: (err: Error) => toast({ title: err.message || "Failed to unrevoke", variant: "destructive" }),
+  });
+
   const extendMutation = useMutation({
     mutationFn: async ({ licenseId, expiresAt }: { licenseId: string; expiresAt: number }) => {
       const res = await fetch(`/api/admin/licenses/${licenseId}/extend`, {
@@ -173,34 +189,34 @@ export default function Licenses() {
   });
 
   const grantMutation = useMutation({
-    mutationFn: async ({ email, tier }: { email: string; tier: "pro" | "teams" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" }) => {
       const res = await fetch("/api/admin/licenses/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, tier }),
+        body: JSON.stringify({ deviceId, tier }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || "Failed to grant license");
       return data as { success?: boolean; alreadyHasLicense?: boolean; licenseId?: string; tier?: string; expiresAt?: number };
     },
-    onSuccess: (data, { email, tier }) => {
+    onSuccess: (data, { deviceId, tier }) => {
       if (data.alreadyHasLicense) {
-        setReplaceModal({ email, tier, licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt! });
+        setReplaceModal({ deviceId, tier, licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt! });
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
-      setGrantEmail("");
-      toast({ title: `Granted ${tier} license to ${email}` });
+      setGrantDeviceId("");
+      toast({ title: `Granted ${tier} license to ${deviceId}` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantReplaceMutation = useMutation({
-    mutationFn: async ({ email, tier }: { email: string; tier: "pro" | "teams" | "custom" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" | "custom" }) => {
       const res = await fetch("/api/admin/licenses/grant-replace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, tier }),
+        body: JSON.stringify({ deviceId, tier }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -211,41 +227,41 @@ export default function Licenses() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
       setReplaceModal(null);
-      setGrantEmail("");
-      toast({ title: `Replaced with ${variables.tier} license for ${variables.email}` });
+      setGrantDeviceId("");
+      toast({ title: `Replaced with ${variables.tier} license for ${variables.deviceId}` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantCustomMutation = useMutation({
-    mutationFn: async ({ email, usersOrStorage, pairingDevices }: { email: string; usersOrStorage: number; pairingDevices: number }) => {
+    mutationFn: async ({ deviceId, usersOrStorage, pairingDevices }: { deviceId: string; usersOrStorage: number; pairingDevices: number }) => {
       const res = await fetch("/api/admin/licenses/grant-custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, usersOrStorage, pairingDevices }),
+        body: JSON.stringify({ deviceId, usersOrStorage, pairingDevices }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || "Failed to grant custom license");
       return data as { success?: boolean; alreadyHasLicense?: boolean; licenseId?: string; tier?: string; expiresAt?: number };
     },
-    onSuccess: (data, { email, usersOrStorage, pairingDevices }) => {
+    onSuccess: (data, { deviceId, usersOrStorage, pairingDevices }) => {
       if (data.alreadyHasLicense) {
-        setReplaceModal({ email, tier: "custom", licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt!, customUsersOrStorage: usersOrStorage, customPairingDevices: pairingDevices });
+        setReplaceModal({ deviceId, tier: "custom", licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt!, customUsersOrStorage: usersOrStorage, customPairingDevices: pairingDevices });
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
-      setGrantEmail("");
-      toast({ title: `Granted custom license (${usersOrStorage} users/storage, ${pairingDevices} devices) to ${email}. Email sent.` });
+      setGrantDeviceId("");
+      toast({ title: `Granted custom license (${usersOrStorage} users/storage, ${pairingDevices} devices) to ${deviceId}.` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantCustomReplaceMutation = useMutation({
-    mutationFn: async ({ email, usersOrStorage, pairingDevices }: { email: string; usersOrStorage: number; pairingDevices: number }) => {
+    mutationFn: async ({ deviceId, usersOrStorage, pairingDevices }: { deviceId: string; usersOrStorage: number; pairingDevices: number }) => {
       const res = await fetch("/api/admin/licenses/grant-custom-replace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, usersOrStorage, pairingDevices }),
+        body: JSON.stringify({ deviceId, usersOrStorage, pairingDevices }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -256,8 +272,8 @@ export default function Licenses() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
       setReplaceModal(null);
-      setGrantEmail("");
-      toast({ title: "Replaced with custom license. Email sent." });
+      setGrantDeviceId("");
+      toast({ title: "Replaced with custom license." });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
@@ -504,7 +520,7 @@ export default function Licenses() {
       <div className="mb-6">
         <h1 className="text-2xl font-display font-bold text-white mb-1">Licenses</h1>
         <p className="text-muted-foreground text-sm">
-          Grant Pro or Teams access to an account • {licenses?.length ?? 0} total
+          Grant Pro or Teams access to a device • {licenses?.length ?? 0} total
         </p>
       </div>
 
@@ -514,16 +530,16 @@ export default function Licenses() {
             <UserPlus className="w-5 h-5" />
             Grant license
           </CardTitle>
-          <CardDescription>Grant Pro, Teams, or Custom plan by email. Account is created if it does not exist. Pro/ Custom grants send license data by email when SMTP is configured.</CardDescription>
+          <CardDescription>Grant Pro, Teams, or Custom plan by device ID. If the device already has a license, you can replace the current plan.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-4">
           <div className="flex-1 min-w-[200px]">
-            <label className="text-sm text-muted-foreground block mb-1">Email</label>
+            <label className="text-sm text-muted-foreground block mb-1">Device ID</label>
             <input
-              type="email"
-              value={grantEmail}
-              onChange={(e) => setGrantEmail(e.target.value)}
-              placeholder="user@example.com"
+              type="text"
+              value={grantDeviceId}
+              onChange={(e) => setGrantDeviceId(e.target.value)}
+              placeholder="paste device UUID"
               className="w-full rounded border bg-background px-3 py-2 text-sm"
             />
           </div>
@@ -567,17 +583,17 @@ export default function Licenses() {
           )}
           <Button
             onClick={() => {
-              const email = grantEmail.trim();
-              if (!email) return;
+              const deviceId = grantDeviceId.trim();
+              if (!deviceId) return;
               if (grantTier === "custom") {
-                grantCustomMutation.mutate({ email, usersOrStorage: customUsersOrStorage, pairingDevices: customPairingDevices });
+                grantCustomMutation.mutate({ deviceId, usersOrStorage: customUsersOrStorage, pairingDevices: customPairingDevices });
               } else {
-                grantMutation.mutate({ email, tier: grantTier });
+                grantMutation.mutate({ deviceId, tier: grantTier });
               }
             }}
             disabled={
               (grantTier === "custom" ? grantCustomMutation.isPending : grantMutation.isPending) ||
-              !grantEmail.trim()
+              !grantDeviceId.trim()
             }
           >
             {grantTier === "custom" ? (grantCustomMutation.isPending ? "Granting…" : "Grant custom") : grantMutation.isPending ? "Granting…" : "Grant license"}
@@ -668,16 +684,14 @@ export default function Licenses() {
                         {!l.renewalAt && !l.graceEndsAt ? "—" : null}
                       </TableCell>
                       <TableCell className="text-right space-x-2">
-                        {l.state !== "revoked" && (
-                          <Button
-                            variant="default"
-                            size="sm"
-                            onClick={() => openModifyDialog(l)}
-                          >
-                            <Settings className="w-3 h-3 mr-1" />
-                            Modify
-                          </Button>
-                        )}
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={() => openModifyDialog(l)}
+                        >
+                          <Settings className="w-3 h-3 mr-1" />
+                          Modify
+                        </Button>
                         {l.state !== "revoked" && (
                           <Button
                             variant="outline"
@@ -686,6 +700,17 @@ export default function Licenses() {
                           >
                             <Ban className="w-3 h-3 mr-1" />
                             Revoke
+                          </Button>
+                        )}
+                        {l.state === "revoked" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => unrevokeMutation.mutate(l.id)}
+                            disabled={unrevokeMutation.isPending}
+                          >
+                            <ShieldCheck className="w-3 h-3 mr-1" />
+                            {unrevokeMutation.isPending ? "Restoring..." : "Unrevoke"}
                           </Button>
                         )}
                         {(l.state === "active" || l.state === "trial_active" || l.state === "grace") && (
@@ -868,11 +893,11 @@ export default function Licenses() {
       <AlertDialog open={!!replaceModal} onOpenChange={(open) => !open && setReplaceModal(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>This email already has a license</AlertDialogTitle>
+            <AlertDialogTitle>This device already has a license</AlertDialogTitle>
             <AlertDialogDescription>
               {replaceModal && (
                 <>
-                  <strong>{replaceModal.email}</strong> already has an active license: <strong>{replaceModal.existingTier}</strong> (expires {formatDate(replaceModal.expiresAt)}).
+                  <strong>{replaceModal.deviceId}</strong> already has an active license: <strong>{replaceModal.existingTier}</strong> (expires {formatDate(replaceModal.expiresAt)}).
                   Do you want to replace it with a new license?
                 </>
               )}
@@ -885,12 +910,12 @@ export default function Licenses() {
                 if (!replaceModal) return;
                 if (replaceModal.tier === "custom" && replaceModal.customUsersOrStorage != null && replaceModal.customPairingDevices != null) {
                   grantCustomReplaceMutation.mutate({
-                    email: replaceModal.email,
+                    deviceId: replaceModal.deviceId,
                     usersOrStorage: replaceModal.customUsersOrStorage,
                     pairingDevices: replaceModal.customPairingDevices,
                   });
                 } else if (replaceModal.tier !== "custom") {
-                  grantReplaceMutation.mutate({ email: replaceModal.email, tier: replaceModal.tier });
+                  grantReplaceMutation.mutate({ deviceId: replaceModal.deviceId, tier: replaceModal.tier });
                 }
               }}
               disabled={
@@ -907,7 +932,7 @@ export default function Licenses() {
 
       {/* Modify License Dialog */}
       <Dialog open={!!modifyLicense} onOpenChange={(open) => !open && setModifyLicense(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="w-[min(56rem,calc(100vw-2rem))] max-w-3xl overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="w-5 h-5" />
@@ -918,14 +943,14 @@ export default function Licenses() {
                 <>
                   Modify settings for <strong>{modifyLicense.accountEmail || "Anonymous Device"}</strong>
                   <br />
-                  <span className="text-xs font-mono text-muted-foreground">ID: {modifyLicense.id}</span>
+                  <span className="text-xs font-mono text-muted-foreground line-clamp-1">ID: {modifyLicense.id}</span>
                 </>
               )}
             </DialogDescription>
           </DialogHeader>
 
           {modifyLicense && (
-            <div className="space-y-5 py-4 max-h-[60vh] overflow-y-auto pr-2">
+            <div className="space-y-5 py-4 max-h-[70vh] overflow-y-auto pr-2">
               {/* License State */}
               <div className="space-y-2">
                 <Label className="flex items-center gap-2">
@@ -977,7 +1002,7 @@ export default function Licenses() {
                 </Select>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Device Limit */}
                 <div className="space-y-2">
                   <Label className="flex items-center gap-2">
@@ -1012,7 +1037,7 @@ export default function Licenses() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Share Limit */}
                 <div className="space-y-2">
                   <Label className="flex items-center gap-2">
@@ -1049,7 +1074,7 @@ export default function Licenses() {
 
               {/* Team Limit */}
               {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label className="flex items-center gap-2">
                       <Users className="w-4 h-4" />
