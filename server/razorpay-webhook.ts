@@ -74,7 +74,7 @@ async function applySubscriptionToLicense(
   });
 
   let license = await storage.getActiveLicenseForAccount(accountId);
-  const licenseId = license?.id ?? `LIC-${Date.now()}-${(sub.id || "rp").slice(-8)}`;
+  const licenseId = license?.id ?? await storage.getNextLicenseId();
   const issuedAt = license?.issuedAt ?? now;
   const tier = sub.notes?.tier ?? "pro";
 

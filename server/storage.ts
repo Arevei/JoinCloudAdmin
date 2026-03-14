@@ -123,6 +123,8 @@ export interface License {
   invoiceId?: string | null;
   discountPercent?: number | null;
   notes?: string | null;
+  shareLimitMonthly?: number | null;
+  overridesJson?: string | null;
 }
 
 export interface TeamInvitation {
@@ -327,6 +329,7 @@ export interface IStorage {
   getPasswordHash(accountId: string): Promise<string | null>;
   setAccountTrialUsed(accountId: string): Promise<void>;
   createLicense(license: { id: string; accountId: string; tier: string; deviceLimit: number; issuedAt: number; expiresAt: number; state: string; signature: string; planInterval?: string; graceEndsAt?: number; renewalAt?: number; customQuota?: number }): Promise<License>;
+  getNextLicenseId(): Promise<string>;
   updateLicense(licenseId: string, updates: { state?: string; expiresAt?: number; signature?: string; planInterval?: string; graceEndsAt?: number | null; renewalAt?: number | null; deviceLimit?: number; tier?: string; customQuota?: number | null }): Promise<void>;
   getActiveLicenseForAccount(accountId: string): Promise<License | null>;
   getLatestLicenseForAccount(accountId: string): Promise<License | null>;
@@ -358,6 +361,8 @@ export interface IStorage {
   canExtendDeviceTrial(deviceId: string): Promise<boolean>;
   getMonthlyShareCount(deviceId: string, ym: string): Promise<number>;
   incrementMonthlyShares(deviceId: string, ym: string): Promise<{ count: number }>;
+  getShareCountSinceCycleStart(deviceId: string, cycleStartSec: number): Promise<number>;
+  incrementSharesForCycle(deviceId: string, cycleStartSec: number): Promise<{ count: number }>;
   createSubscription(subscription: Omit<Subscription, 'createdAt' | 'updatedAt'>): Promise<Subscription>;
   getSubscriptionById(subscriptionId: string): Promise<Subscription | null>;
   getSubscriptionByAccountId(accountId: string): Promise<Subscription | null>;
@@ -381,7 +386,7 @@ export interface IStorage {
   updateAccountReferral(accountId: string, updates: { referralCode?: string; referredBy?: string; referralCount?: number; referralDaysEarned?: number }): Promise<void>;
   getReferralStats(accountId: string): Promise<ReferralStats>;
   getLicenseCheckResponse(deviceId: string): Promise<LicenseCheckResponse>;
-  createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License>;
+  createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string, licenseId?: string): Promise<License>;
   getLicenseByDeviceId(deviceId: string): Promise<License | null>;
   linkLicenseToAccount(licenseId: string, accountId: string): Promise<void>;
   createSubscriptionRequest(request: {
@@ -435,6 +440,7 @@ export interface IStorage {
     discountPercent?: number;
     notes?: string;
   }): Promise<void>;
+  updateLicenseOverridesJson(licenseId: string, overridesJson: string): Promise<void>;
 }
 
 // === HELPERS ===
@@ -494,6 +500,8 @@ function mapLicenseRow(row: typeof licenses.$inferSelect): License {
     invoiceId: row.invoiceId ?? null,
     discountPercent: row.discountPercent != null ? Number(row.discountPercent) : null,
     notes: row.notes ?? null,
+    shareLimitMonthly: row.shareLimitMonthly != null ? Number(row.shareLimitMonthly) : null,
+    overridesJson: row.overridesJson ?? null,
   };
 }
 
@@ -1602,6 +1610,24 @@ export class DrizzleStorage implements IStorage {
 
   // === LICENSES ===
 
+  async getNextLicenseId(): Promise<string> {
+    const result = await db.execute(sql`
+      INSERT INTO app_settings ("key", value)
+      VALUES ('license_serial_counter', '1')
+      ON CONFLICT ("key")
+      DO UPDATE SET value = (
+        CASE
+          WHEN app_settings.value ~ '^[0-9]+$' THEN CAST(app_settings.value AS integer)
+          ELSE 0
+        END + 1
+      )::text
+      RETURNING value
+    `);
+    const nextValue = Number((((result.rows[0] || {}) as { value?: string }).value) ?? 1);
+
+    return `LC_${String(nextValue).padStart(11, "0")}`;
+  }
+
   async createLicense(license: { id: string; accountId: string; tier: string; deviceLimit: number; issuedAt: number; expiresAt: number; state: string; signature: string; planInterval?: string; graceEndsAt?: number; renewalAt?: number; customQuota?: number }): Promise<License> {
     const now = new Date().toISOString();
     await db.insert(licenses).values({
@@ -1856,18 +1882,25 @@ export class DrizzleStorage implements IStorage {
     await db.update(licenses).set(set).where(eq(licenses.id, licenseId));
   }
 
+  async updateLicenseOverridesJson(licenseId: string, overridesJson: string): Promise<void> {
+    const now = new Date().toISOString();
+    await db
+      .update(licenses)
+      .set({ overridesJson, updatedAt: now })
+      .where(eq(licenses.id, licenseId));
+  }
+
   // === DEVICE-ONLY LICENSE ===
 
-  async createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string): Promise<License> {
-    const { randomUUID } = await import('crypto');
+  async createDeviceOnlyLicense(deviceId: string, tier: string, expiresAt: number, signature: string, licenseId?: string): Promise<License> {
     const now = new Date().toISOString();
     const nowUnix = Math.floor(Date.now() / 1000);
-    const licenseId = randomUUID();
+    const resolvedLicenseId = licenseId ?? await this.getNextLicenseId();
 
     await this.ensureDeviceAccount(deviceId);
 
     await db.insert(licenses).values({
-      id: licenseId,
+      id: resolvedLicenseId,
       accountId: deviceId,
       tier,
       deviceLimit: 1,
@@ -1880,9 +1913,9 @@ export class DrizzleStorage implements IStorage {
       isDeviceOnly: 1,
     });
 
-    await this.addLicenseHost(licenseId, deviceId);
+    await this.addLicenseHost(resolvedLicenseId, deviceId);
 
-    const rows = await db.select().from(licenses).where(eq(licenses.id, licenseId)).limit(1);
+    const rows = await db.select().from(licenses).where(eq(licenses.id, resolvedLicenseId)).limit(1);
     return mapLicenseRow(rows[0]);
   }
 
@@ -1919,7 +1952,9 @@ export class DrizzleStorage implements IStorage {
   async getOrCreateDeviceTrial(deviceId: string, trialDays = 7): Promise<{ trialStartedAt: string; trialEndsAt: string; trialExtendedAt: string | null }> {
     const now = new Date();
     const nowIso = now.toISOString();
-    const endsAtIso = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000).toISOString();
+    // In dev mode 1 "day unit" = 1 minute; in production 1 "day unit" = 24 hours.
+    const TIME_UNIT_MS = process.env.DEV_MODE === "true" ? 60 * 1000 : 24 * 60 * 60 * 1000;
+    const endsAtIso = new Date(now.getTime() + trialDays * TIME_UNIT_MS).toISOString();
 
     const existing = await db.select().from(deviceTrials).where(eq(deviceTrials.deviceId, deviceId)).limit(1);
     if (existing.length) {
@@ -1947,7 +1982,8 @@ export class DrizzleStorage implements IStorage {
     if (!rows.length) throw new Error('Device trial not found');
     if (rows[0].trialExtendedAt) throw new Error('Trial already extended');
     const baseEnd = new Date(rows[0].trialEndsAt);
-    const newEnds = new Date(baseEnd.getTime() + extraDays * 24 * 60 * 60 * 1000).toISOString();
+    const TIME_UNIT_MS = process.env.DEV_MODE === "true" ? 60 * 1000 : 24 * 60 * 60 * 1000;
+    const newEnds = new Date(baseEnd.getTime() + extraDays * TIME_UNIT_MS).toISOString();
     await db.update(deviceTrials).set({ trialExtendedAt: now, trialEndsAt: newEnds, updatedAt: now }).where(eq(deviceTrials.deviceId, deviceId));
     return { trialEndsAt: newEnds };
   }
@@ -1987,6 +2023,18 @@ export class DrizzleStorage implements IStorage {
       .where(and(eq(deviceUsageMonthly.deviceId, deviceId), eq(deviceUsageMonthly.ym, ym)))
       .limit(1);
     return { count: Number(rows[0]?.sharesCreated ?? 0) };
+  }
+
+  /** Returns share count for the current billing cycle identified by cycleStartSec (Unix seconds). */
+  async getShareCountSinceCycleStart(deviceId: string, cycleStartSec: number): Promise<number> {
+    const key = String(cycleStartSec);
+    return this.getMonthlyShareCount(deviceId, key);
+  }
+
+  /** Atomically increments share count for the current billing cycle. */
+  async incrementSharesForCycle(deviceId: string, cycleStartSec: number): Promise<{ count: number }> {
+    const key = String(cycleStartSec);
+    return this.incrementMonthlyShares(deviceId, key);
   }
 
   // === LOGOUT REQUESTS ===
@@ -2482,7 +2530,8 @@ export class DrizzleStorage implements IStorage {
     }
 
     const hasAccount = !!account && !account.email.includes('@device.local');
-    const isBlocked = state === 'expired' || state === 'suspended' || state === 'revoked';
+    const isFreeTierActive = state === 'active' && (license?.tier === 'FREE' || (license?.tier || '').toUpperCase() === 'FREE');
+    const isBlocked = (state === 'expired' || state === 'suspended' || state === 'revoked') && !isFreeTierActive;
 
     let primaryButton = { label: 'Sign In', action: 'sign_in', url: `${webUrl}/auth/login?deviceId=${deviceId}` };
     let secondaryButton: { label: string; action: string; url: string } | null = null;
@@ -2496,6 +2545,11 @@ export class DrizzleStorage implements IStorage {
         secondaryButton = { label: 'Upgrade', action: 'upgrade', url: `${webUrl}/pricing` };
       }
       bannerText = `Trial: ${daysRemaining} days remaining`;
+    } else if (state === 'active' && (license?.tier === 'FREE' || (license?.tier || '').toUpperCase() === 'FREE')) {
+      primaryButton = { label: 'Dashboard', action: 'dashboard', url: `${webUrl}/dashboard` };
+      secondaryButton = { label: 'Upgrade', action: 'upgrade', url: `${webUrl}/pricing` };
+      bannerText = 'Free Tier - Active';
+      blockingMessage = null;
     } else if (state === 'active') {
       primaryButton = { label: 'Dashboard', action: 'dashboard', url: `${webUrl}/dashboard` };
       bannerText = `${license?.tier?.toUpperCase() || 'PRO'} - Active`;

@@ -31,11 +31,60 @@ import { sendLicenseGrantEmail } from "./mailer";
 import Stripe from "stripe";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { verifyRazorpaySignature, handleRazorpayWebhook } from "./razorpay-webhook";
+import { getTimeUnitSeconds, getLicenseTimeMode } from "./license-time";
+import { emitLicenseUpdated } from "./license-events";
 
 const ADMIN_VERSION = "1.0.0";
 
 /** Trial duration in days for first-time sign-in (configurable via TRIAL_DAYS env, default 7). */
 const TRIAL_DAYS = Math.max(1, parseInt(process.env.TRIAL_DAYS || "7", 10) || 7);
+
+/**
+ * Time unit in seconds for all license-related \"day\" calculations.
+ * Backed by LICENSE_TIME_MODE (dev|production) via the license-time helper.
+ */
+const TIME_UNIT_SECS = getTimeUnitSeconds();
+
+/** True when running in dev time mode (1 day = 60s). Used for config and UI. */
+const IS_DEV = getLicenseTimeMode() === "dev";
+
+/** Free tier has no expiration; use far-future Unix timestamp (year 2038 safe). */
+const FREE_TIER_NO_EXPIRY = 2147483647;
+
+const DEV_TRIAL_MINUTES_DEFAULT = 7;
+const DEV_TRIAL_MINUTES_MIN = 1;
+const DEV_TRIAL_MINUTES_MAX = 60;
+const DEV_EXPIRY_WARNING_MINUTES_DEFAULT = 2;
+
+/** Trial duration in seconds for new trials. In dev uses admin-setting dev_trial_minutes; in prod uses TRIAL_DAYS * TIME_UNIT_SECS. */
+async function getTrialDurationSeconds(): Promise<number> {
+  if (getLicenseTimeMode() !== "dev") {
+    return TRIAL_DAYS * TIME_UNIT_SECS;
+  }
+  const raw = await storage.getSetting("dev_trial_minutes");
+  const mins = Math.min(DEV_TRIAL_MINUTES_MAX, Math.max(DEV_TRIAL_MINUTES_MIN, parseInt(raw || String(DEV_TRIAL_MINUTES_DEFAULT), 10) || DEV_TRIAL_MINUTES_DEFAULT));
+  return mins * 60;
+}
+
+/** For getOrCreateDeviceTrial: in dev pass minutes (storage treats 1 "day" = 1 min); in prod pass TRIAL_DAYS. */
+async function getTrialDurationDaysForStorage(): Promise<number> {
+  if (getLicenseTimeMode() !== "dev") {
+    return TRIAL_DAYS;
+  }
+  const raw = await storage.getSetting("dev_trial_minutes");
+  return Math.min(DEV_TRIAL_MINUTES_MAX, Math.max(DEV_TRIAL_MINUTES_MIN, parseInt(raw || String(DEV_TRIAL_MINUTES_DEFAULT), 10) || DEV_TRIAL_MINUTES_DEFAULT));
+}
+
+async function getDevTrialMinutes(): Promise<number> {
+  const raw = await storage.getSetting("dev_trial_minutes");
+  return Math.min(DEV_TRIAL_MINUTES_MAX, Math.max(DEV_TRIAL_MINUTES_MIN, parseInt(raw || String(DEV_TRIAL_MINUTES_DEFAULT), 10) || DEV_TRIAL_MINUTES_DEFAULT));
+}
+
+async function getDevExpiryWarningMinutes(): Promise<number> {
+  const raw = await storage.getSetting("dev_expiry_warning_minutes");
+  const n = parseInt(raw || String(DEV_EXPIRY_WARNING_MINUTES_DEFAULT), 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEV_EXPIRY_WARNING_MINUTES_DEFAULT;
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -395,6 +444,7 @@ export async function registerRoutes(
   app.options("/api/v1/devices/bootstrap-trial", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/devices/usage/shares/increment", (req, res) => { setCors(req, res); res.sendStatus(204); });
   app.options("/api/v1/trial/extend-token", (req, res) => { setCors(req, res); res.sendStatus(204); });
+  app.options("/api/v1/subscription/requests", (req, res) => { setCors(req, res); res.sendStatus(204); });
 
   // === PHASE 2: AUTH ===
   app.post("/api/v1/auth/register", authRateLimit, async (req, res) => {
@@ -593,7 +643,7 @@ export async function registerRoutes(
     setCors(req, res);
     try {
       const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
-      const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+      const trial = await storage.getOrCreateDeviceTrial(deviceId, await getTrialDurationDaysForStorage());
       const now = new Date();
       const trialEnds = new Date(trial.trialEndsAt);
       const isExpired = now >= trialEnds;
@@ -608,7 +658,7 @@ export async function registerRoutes(
           }
           const nowSec = Math.floor(Date.now() / 1000);
           const expiresAt = Math.floor(trialEnds.getTime() / 1000);
-          const licenseId = `lic_trial_${deviceId}`;
+          const licenseId = await storage.getNextLicenseId();
           const { signLicense } = await import("./license-sign");
           const signature = signLicense({
             license_id: licenseId,
@@ -698,7 +748,7 @@ export async function registerRoutes(
 
       // If no license, create trial license
       if (!license) {
-        const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+        const trial = await storage.getOrCreateDeviceTrial(deviceId, await getTrialDurationDaysForStorage());
         const trialEnds = new Date(trial.trialEndsAt);
         const now = new Date();
         const isExpired = now >= trialEnds;
@@ -707,30 +757,24 @@ export async function registerRoutes(
           // Create device-only trial license
           const nowSec = Math.floor(Date.now() / 1000);
           const expiresAt = Math.floor(trialEnds.getTime() / 1000);
-          const licenseId = `lic_trial_${deviceId}`;
-          
-          // Check if license with this ID already exists
-          const existingLicense = await storage.getLicenseById(licenseId);
-          if (!existingLicense) {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: deviceId,
-              tier: "TRIAL",
-              device_limit: 1,
-              issued_at: nowSec,
-              expires_at: expiresAt,
-              state: "trial_active",
-            });
-            
-            license = await storage.createDeviceOnlyLicense(
-              deviceId,
-              "TRIAL",
-              expiresAt,
-              signature
-            );
-          } else {
-            license = existingLicense;
-          }
+          const licenseId = await storage.getNextLicenseId();
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: deviceId,
+            tier: "TRIAL",
+            device_limit: 1,
+            issued_at: nowSec,
+            expires_at: expiresAt,
+            state: "trial_active",
+          });
+
+          license = await storage.createDeviceOnlyLicense(
+            deviceId,
+            "TRIAL",
+            expiresAt,
+            signature,
+            licenseId
+          );
         }
       }
 
@@ -774,14 +818,54 @@ export async function registerRoutes(
     try {
       const { deviceId } = z.object({ deviceId: z.string().min(8).max(128) }).parse(req.body);
       const now = new Date();
-      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-      const { count } = await storage.incrementMonthlyShares(deviceId, ym);
+      const nowSec = Math.floor(now.getTime() / 1000);
 
-      const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
-      const trialEnds = new Date(trial.trialEndsAt);
-      const limit = now >= trialEnds ? TIER_DEFAULTS.FREE.shareLimitMonthly : 1000;
+      // Determine effective share limit from the device's actual license.
+      let limit: number = TIER_DEFAULTS.FREE.shareLimitMonthly!;
+      const deviceLicense = await storage.getLicenseForHost(deviceId);
+
+      // Use billing cycle anchor for all tiers. For Free tier we also honour calendar-month
+      // resets: take whichever is more recent — the plan-change anchor or the start of the
+      // current calendar month. This ensures a just-downgraded device starts at 0 AND a
+      // long-term Free user still gets a fresh count every month.
+      let cycleStartSec: number;
+      if (deviceLicense) {
+        const anchor = deviceLicense.renewalAt ?? deviceLicense.issuedAt;
+        const rawCycleStart = anchor <= nowSec ? anchor : deviceLicense.issuedAt;
+        const isFreeTierInc = (deviceLicense.tier || "").toUpperCase() === "FREE";
+        if (isFreeTierInc) {
+          const d = new Date();
+          const monthStartSec = Math.floor(new Date(d.getFullYear(), d.getMonth(), 1).getTime() / 1000);
+          cycleStartSec = Math.max(rawCycleStart, monthStartSec);
+        } else {
+          cycleStartSec = rawCycleStart;
+        }
+
+        const isExpired = deviceLicense.expiresAt < nowSec && deviceLicense.state !== "revoked";
+        const effectiveState = isExpired ? "expired" : deviceLicense.state;
+        const canExtend = await storage.canExtendDeviceTrial(deviceId);
+        const ents = resolveEntitlementsByState(
+          effectiveState,
+          (deviceLicense.tier || "free").toLowerCase(),
+          deviceLicense.expiresAt ? new Date(deviceLicense.expiresAt * 1000).toISOString() : null,
+          canExtend
+        );
+        limit = ents.shareLimitMonthly === null ? 999999 : (ents.shareLimitMonthly ?? TIER_DEFAULTS.FREE.shareLimitMonthly!);
+      } else {
+        // No license: calendar-month key, free limit
+        const d = new Date();
+        const calKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const { count: calCount } = await storage.incrementMonthlyShares(deviceId, calKey);
+        const allowed = calCount <= limit;
+        const remaining = Math.max(0, limit - calCount);
+        res.json({ allowed, remaining, limit });
+        return;
+      }
+
+      const { count } = await storage.incrementSharesForCycle(deviceId, cycleStartSec);
       const allowed = count <= limit;
-      res.json({ allowed, remaining: Math.max(0, limit - count), limit });
+      const remaining = limit >= 999999 ? null : Math.max(0, limit - count);
+      res.json({ allowed, remaining, limit: limit >= 999999 ? null : limit });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -847,7 +931,7 @@ export async function registerRoutes(
         trialExtendTokens.delete(token);
         const { deviceId } = trialExtendEntry;
         await storage.extendDeviceTrial(deviceId, 7);
-        const trial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+        const trial = await storage.getOrCreateDeviceTrial(deviceId, await getTrialDurationDaysForStorage());
         const response: EntitlementsResponse = {
           licenseState: "TRIAL",
           tier: "FREE",
@@ -898,14 +982,15 @@ export async function registerRoutes(
 
         if (!license && !account.trialUsed) {
           const now = Math.floor(Date.now() / 1000);
-          const licenseId = `LIC-${Date.now()}-${accountId.slice(0, 8)}`;
+          const trialDurationSecs = await getTrialDurationSeconds();
+          const licenseId = await storage.getNextLicenseId();
           const payload = {
             license_id: licenseId,
             account_id: accountId,
             tier: "trial",
             device_limit: 5,
             issued_at: now,
-            expires_at: now + TRIAL_DAYS * 24 * 3600,
+            expires_at: now + trialDurationSecs,
             state: "trial_active",
             features: { smart_workspaces: true, activity_feed: true },
           };
@@ -941,9 +1026,10 @@ export async function registerRoutes(
       if (license && license.tier.toLowerCase() === 'trial' && license.state === 'trial_active') {
         if (await storage.canExtendDeviceTrial(deviceId)) {
           try {
-            await storage.extendDeviceTrial(deviceId, 7); // Extend by 7 more days (7+7=14 total)
+            const trialDaysForStorage = await getTrialDurationDaysForStorage();
+            await storage.extendDeviceTrial(deviceId, trialDaysForStorage); // Extend by same duration (e.g. 7 more days or 7 more min in dev)
             // Update license expiration
-            const newTrial = await storage.getOrCreateDeviceTrial(deviceId, TRIAL_DAYS);
+            const newTrial = await storage.getOrCreateDeviceTrial(deviceId, trialDaysForStorage);
             const newExpiresAt = Math.floor(new Date(newTrial.trialEndsAt).getTime() / 1000);
             const newSignature = signLicense({
               license_id: license.id,
@@ -1041,9 +1127,10 @@ export async function registerRoutes(
       }
 
       await storage.ensureDeviceAccount(host_uuid);
-      const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const issuedAt = now;
-      const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
+      const trialDurationSecs = await getTrialDurationSeconds();
+      const expiresAt = issuedAt + trialDurationSecs;
       const state = "trial_active";
       const payload = {
         license_id: licenseId,
@@ -1110,9 +1197,10 @@ export async function registerRoutes(
 
       if (!license) {
         if (!account.trialUsed) {
-          const licenseId = `LIC-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+          const licenseId = await storage.getNextLicenseId();
           const issuedAt = Math.floor(Date.now() / 1000);
-          const expiresAt = issuedAt + TRIAL_DAYS * 24 * 3600;
+          const trialDurationSecs = await getTrialDurationSeconds();
+          const expiresAt = issuedAt + trialDurationSecs;
           const state = "trial_active";
           const payload = {
             license_id: licenseId,
@@ -1211,7 +1299,7 @@ export async function registerRoutes(
       const now = Math.floor(Date.now() / 1000);
       const PAID_PLAN_DAYS = 30;
       const expiresAt = now + PAID_PLAN_DAYS * 24 * 3600; // 30 days from now
-      const licenseId = `LIC-${Date.now()}-${auth.accountId.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
         account_id: auth.accountId,
@@ -1399,9 +1487,9 @@ export async function registerRoutes(
       }
       const proLimit = parseInt(process.env.JOINCLOUD_PRO_DEVICE_LIMIT ?? "5", 10);
       const now = Math.floor(Date.now() / 1000);
-      const expiresAt = now + 30 * 24 * 3600;
+      const expiresAt = now + 30 * TIME_UNIT_SECS;
       let license = await storage.getActiveLicenseForAccount(account_id);
-      const licenseId = license?.id ?? `LIC-${Date.now()}-${razorpay_payment_id.slice(-8)}`;
+      const licenseId = license?.id ?? await storage.getNextLicenseId();
       const tierName = plan ?? "pro";
       const limit = device_limit ? Math.max(1, parseInt(device_limit, 10) || proLimit) : proLimit;
       const payload = {
@@ -1510,14 +1598,18 @@ export async function registerRoutes(
     }
   });
 
-  // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic)
+  // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic, dev_trial_minutes, dev_expiry_warning_minutes)
   app.get("/api/v1/admin/settings", async (req, res) => {
     try {
       const payment_mode = await storage.getSetting("payment_mode") ?? "LIVE";
       const subscription_mode = await storage.getSetting("subscription_mode") ?? "automatic";
+      const dev_trial_minutes = await getDevTrialMinutes();
+      const dev_expiry_warning_minutes = await getDevExpiryWarningMinutes();
       res.json({
         payment_mode: payment_mode === "DEV" ? "DEV" : "LIVE",
         subscription_mode: subscription_mode === "manual" ? "manual" : "automatic",
+        dev_trial_minutes,
+        dev_expiry_warning_minutes,
       });
     } catch (err) {
       console.error("Admin settings error:", err);
@@ -1555,6 +1647,40 @@ export async function registerRoutes(
         return;
       }
       console.error("Set subscription mode error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/v1/admin/settings/dev-trial-minutes", async (req, res) => {
+    try {
+      const body = z.object({
+        dev_trial_minutes: z.number().int().min(DEV_TRIAL_MINUTES_MIN).max(DEV_TRIAL_MINUTES_MAX),
+      }).parse(req.body);
+      await storage.setSetting("dev_trial_minutes", String(body.dev_trial_minutes));
+      res.json({ dev_trial_minutes: body.dev_trial_minutes });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Set dev trial minutes error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/v1/admin/settings/dev-expiry-warning-minutes", async (req, res) => {
+    try {
+      const body = z.object({
+        dev_expiry_warning_minutes: z.number().int().min(0).max(60),
+      }).parse(req.body);
+      await storage.setSetting("dev_expiry_warning_minutes", String(body.dev_expiry_warning_minutes));
+      res.json({ dev_expiry_warning_minutes: body.dev_expiry_warning_minutes });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Set dev expiry warning minutes error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
@@ -1736,53 +1862,31 @@ export async function registerRoutes(
           await storage.ensureHostRow(request.device_id);
           await storage.addLicenseHost(existingForDevice.id, request.device_id);
         } else {
-          // No license for this device yet: create or reuse one with stable ID (one license per device ID)
-          licenseId = "lic_" + crypto.createHash("sha256").update(request.device_id).digest("hex");
-          const existingById = await storage.getLicenseById(licenseId);
-          if (existingById) {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: existingById.accountId,
-              tier,
-              device_limit: deviceLimit,
-              issued_at: existingById.issuedAt,
-              expires_at: expiresAt,
-              state: "active",
-              custom_quota: body.custom_quota ?? undefined,
-            });
-            await storage.updateLicense(licenseId, {
-              tier,
-              deviceLimit,
-              expiresAt,
-              state: "active",
-              signature,
-              customQuota: body.custom_quota ?? null,
-            });
-          } else {
-            const signature = signLicense({
-              license_id: licenseId,
-              account_id: accountId,
-              tier,
-              device_limit: deviceLimit,
-              issued_at: nowSec,
-              expires_at: expiresAt,
-              state: "active",
-            });
-            await storage.createLicense({
-              id: licenseId,
-              accountId,
-              tier,
-              deviceLimit,
-              issuedAt: nowSec,
-              expiresAt,
-              state: "active",
-              signature,
-              planInterval: "year",
-              graceEndsAt: undefined,
-              renewalAt: expiresAt,
-              customQuota: body.custom_quota ?? undefined,
-            });
-          }
+          // No license for this device yet: create a fresh sequential license ID.
+          licenseId = await storage.getNextLicenseId();
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: accountId,
+            tier,
+            device_limit: deviceLimit,
+            issued_at: nowSec,
+            expires_at: expiresAt,
+            state: "active",
+          });
+          await storage.createLicense({
+            id: licenseId,
+            accountId,
+            tier,
+            deviceLimit,
+            issuedAt: nowSec,
+            expiresAt,
+            state: "active",
+            signature,
+            planInterval: "year",
+            graceEndsAt: undefined,
+            renewalAt: expiresAt,
+            customQuota: body.custom_quota ?? undefined,
+          });
           await storage.ensureHostRow(request.device_id);
           await storage.addLicenseHost(licenseId, request.device_id);
         }
@@ -1792,7 +1896,7 @@ export async function registerRoutes(
         if (existingActive) {
           await storage.updateLicense(existingActive.id, { state: "expired", expiresAt: nowSec });
         }
-        licenseId = `lic_manual_${id}`;
+        licenseId = await storage.getNextLicenseId();
         const signature = signLicense({
           license_id: licenseId,
           account_id: accountId,
@@ -2043,20 +2147,11 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         tier: z.enum(["pro", "teams"]),
       }).parse(req.body);
-      let account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        const id = crypto.randomUUID();
-        await storage.createAccount(id, body.email, ".");
-        account = await storage.getAccountById(id);
-        if (!account) {
-          res.status(500).json({ message: "Failed to create account" });
-          return;
-        }
-      }
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const now = Math.floor(Date.now() / 1000);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         res.status(200).json({
           alreadyHasLicense: true,
@@ -2066,13 +2161,12 @@ export async function registerRoutes(
         });
         return;
       }
-      const deviceLimit = body.tier === "teams" ? 5 : 5;
-      const now = Math.floor(Date.now() / 1000);
-      const expiresAt = now + 365 * 24 * 3600;
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const deviceLimit = body.tier === "teams" ? TIER_DEFAULTS.TEAMS.maxDevicesTotal! : TIER_DEFAULTS.PRO.maxDevicesTotal!;
+      const expiresAt = now + 365 * TIME_UNIT_SECS;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: body.tier,
         device_limit: deviceLimit,
         issued_at: now,
@@ -2081,9 +2175,11 @@ export async function registerRoutes(
         features: { smart_workspaces: true, activity_feed: true },
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: body.tier,
         deviceLimit,
         issuedAt: now,
@@ -2091,8 +2187,8 @@ export async function registerRoutes(
         state: "active",
         signature,
       });
-      sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId, deviceLimit, expiresAt }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2106,22 +2202,17 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-replace", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         tier: z.enum(["pro", "teams"]),
       }).parse(req.body);
-      const account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        res.status(404).json({ message: "Account not found" });
-        return;
-      }
-      const deviceLimit = body.tier === "teams" ? 5 : 5;
+      const deviceLimit = body.tier === "teams" ? TIER_DEFAULTS.TEAMS.maxDevicesTotal! : TIER_DEFAULTS.PRO.maxDevicesTotal!;
       const now = Math.floor(Date.now() / 1000);
-      const expiresAt = now + 365 * 24 * 3600;
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const expiresAt = now + 365 * TIME_UNIT_SECS;
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         const payload = {
           license_id: existingLicense.id,
-          account_id: existingLicense.accountId,
+          account_id: body.deviceId,
           tier: body.tier,
           device_limit: deviceLimit,
           issued_at: existingLicense.issuedAt,
@@ -2130,15 +2221,17 @@ export async function registerRoutes(
           features: { smart_workspaces: true, activity_feed: true },
         };
         const signature = signLicense(payload);
+        await storage.ensureDeviceAccount(body.deviceId);
+        await storage.ensureHostRow(body.deviceId);
         await storage.updateLicense(existingLicense.id, { tier: body.tier, deviceLimit, expiresAt, signature });
-        sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId: existingLicense.id, deviceLimit, expiresAt }).catch(() => {});
-        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: account.id, email: account.email });
+        await storage.addLicenseHost(existingLicense.id, body.deviceId);
+        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: body.deviceId, deviceId: body.deviceId });
         return;
       }
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: body.tier,
         device_limit: deviceLimit,
         issued_at: now,
@@ -2147,9 +2240,11 @@ export async function registerRoutes(
         features: { smart_workspaces: true, activity_feed: true },
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: body.tier,
         deviceLimit,
         issuedAt: now,
@@ -2157,8 +2252,8 @@ export async function registerRoutes(
         state: "active",
         signature,
       });
-      sendLicenseGrantEmail({ to: account.email, tier: body.tier, licenseId, deviceLimit, expiresAt }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2172,21 +2267,11 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-custom", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         usersOrStorage: z.number().int().min(1).max(1000),
         pairingDevices: z.number().int().min(1).max(100),
       }).parse(req.body);
-      let account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        const id = crypto.randomUUID();
-        await storage.createAccount(id, body.email, ".");
-        account = await storage.getAccountById(id);
-        if (!account) {
-          res.status(500).json({ message: "Failed to create account" });
-          return;
-        }
-      }
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         res.status(200).json({
           alreadyHasLicense: true,
@@ -2197,11 +2282,11 @@ export async function registerRoutes(
         return;
       }
       const now = Math.floor(Date.now() / 1000);
-      const expiresAt = now + 365 * 24 * 3600;
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const expiresAt = now + 365 * TIME_UNIT_SECS;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: "custom",
         device_limit: body.pairingDevices,
         issued_at: now,
@@ -2211,9 +2296,11 @@ export async function registerRoutes(
         custom_quota: body.usersOrStorage,
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: "custom",
         deviceLimit: body.pairingDevices,
         issuedAt: now,
@@ -2222,15 +2309,8 @@ export async function registerRoutes(
         signature,
         customQuota: body.usersOrStorage,
       });
-      sendLicenseGrantEmail({
-        to: account.email,
-        tier: "custom",
-        licenseId,
-        deviceLimit: body.pairingDevices,
-        expiresAt,
-        customQuota: body.usersOrStorage,
-      }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2244,22 +2324,17 @@ export async function registerRoutes(
   app.post("/api/admin/licenses/grant-custom-replace", async (req, res) => {
     try {
       const body = z.object({
-        email: z.string().email(),
+        deviceId: z.string().min(8).max(128),
         usersOrStorage: z.number().int().min(1).max(1000),
         pairingDevices: z.number().int().min(1).max(100),
       }).parse(req.body);
-      const account = await storage.getAccountByEmail(body.email);
-      if (!account) {
-        res.status(404).json({ message: "Account not found" });
-        return;
-      }
       const now = Math.floor(Date.now() / 1000);
-      const expiresAt = now + 365 * 24 * 3600;
-      const existingLicense = await storage.getActiveLicenseForAccount(account.id);
+      const expiresAt = now + 365 * TIME_UNIT_SECS;
+      const existingLicense = await storage.getLicenseByDeviceId(body.deviceId);
       if (existingLicense) {
         const payload = {
           license_id: existingLicense.id,
-          account_id: existingLicense.accountId,
+          account_id: body.deviceId,
           tier: "custom",
           device_limit: body.pairingDevices,
           issued_at: existingLicense.issuedAt,
@@ -2269,6 +2344,8 @@ export async function registerRoutes(
           custom_quota: body.usersOrStorage,
         };
         const signature = signLicense(payload);
+        await storage.ensureDeviceAccount(body.deviceId);
+        await storage.ensureHostRow(body.deviceId);
         await storage.updateLicense(existingLicense.id, {
           tier: "custom",
           deviceLimit: body.pairingDevices,
@@ -2276,21 +2353,14 @@ export async function registerRoutes(
           signature,
           customQuota: body.usersOrStorage,
         });
-        sendLicenseGrantEmail({
-          to: account.email,
-          tier: "custom",
-          licenseId: existingLicense.id,
-          deviceLimit: body.pairingDevices,
-          expiresAt,
-          customQuota: body.usersOrStorage,
-        }).catch(() => {});
-        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: account.id, email: account.email });
+        await storage.addLicenseHost(existingLicense.id, body.deviceId);
+        res.status(200).json({ success: true, updated: true, licenseId: existingLicense.id, accountId: body.deviceId, deviceId: body.deviceId });
         return;
       }
-      const licenseId = `LIC-${Date.now()}-${account.id.slice(0, 8)}`;
+      const licenseId = await storage.getNextLicenseId();
       const payload = {
         license_id: licenseId,
-        account_id: account.id,
+        account_id: body.deviceId,
         tier: "custom",
         device_limit: body.pairingDevices,
         issued_at: now,
@@ -2300,9 +2370,11 @@ export async function registerRoutes(
         custom_quota: body.usersOrStorage,
       };
       const signature = signLicense(payload);
+      await storage.ensureDeviceAccount(body.deviceId);
+      await storage.ensureHostRow(body.deviceId);
       await storage.createLicense({
         id: licenseId,
-        accountId: account.id,
+        accountId: body.deviceId,
         tier: "custom",
         deviceLimit: body.pairingDevices,
         issuedAt: now,
@@ -2311,15 +2383,8 @@ export async function registerRoutes(
         signature,
         customQuota: body.usersOrStorage,
       });
-      sendLicenseGrantEmail({
-        to: account.email,
-        tier: "custom",
-        licenseId,
-        deviceLimit: body.pairingDevices,
-        expiresAt,
-        customQuota: body.usersOrStorage,
-      }).catch(() => {});
-      res.status(201).json({ success: true, licenseId, accountId: account.id, email: account.email });
+      await storage.addLicenseHost(licenseId, body.deviceId);
+      res.status(201).json({ success: true, licenseId, accountId: body.deviceId, deviceId: body.deviceId });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2437,35 +2502,150 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/admin/licenses/:licenseId/extend", async (req, res) => {
+  app.post("/api/admin/licenses/:licenseId/unrevoke", async (req, res) => {
     try {
       const { licenseId } = req.params;
-      const body = z.object({
-        expires_at: z.number().int().positive(),
-        grace_ends_at: z.number().int().nonnegative().optional(),
-      }).parse(req.body);
       const license = await storage.getLicenseById(licenseId);
       if (!license) {
         res.status(404).json({ message: "License not found" });
         return;
       }
+
+      const now = Math.floor(Date.now() / 1000);
+      let restoredState: "trial_active" | "active" | "grace" | "expired";
+      if (license.expiresAt <= now) {
+        restoredState = "expired";
+      } else if (license.graceEndsAt && license.graceEndsAt > now) {
+        restoredState = "grace";
+      } else if (license.tier === "trial") {
+        restoredState = "trial_active";
+      } else {
+        restoredState = "active";
+      }
+
       const payload = {
         license_id: license.id,
         account_id: license.accountId,
         tier: license.tier,
         device_limit: license.deviceLimit,
         issued_at: license.issuedAt,
-        expires_at: body.expires_at,
+        expires_at: license.expiresAt,
+        state: restoredState,
+        grace_ends_at: license.graceEndsAt ?? undefined,
+        features: { smart_workspaces: true, activity_feed: true },
+      };
+      const signature = signLicense(payload);
+      await storage.updateLicense(licenseId, {
+        state: restoredState,
+        signature,
+      });
+
+      res.json({ success: true, state: restoredState });
+    } catch (err) {
+      console.error("Unrevoke license error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/licenses/:licenseId/end-trial-now", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+      // Allow ending any plan (trial, pro, teams, custom) — move to Free tier
+      if (String(license.state || "").toLowerCase() === "revoked") {
+        res.status(400).json({ message: "Cannot end a revoked license" });
+        return;
+      }
+      const freeTier = "FREE";
+      const freeDeviceLimit = 1;
+      const payload = {
+        license_id: license.id,
+        account_id: license.accountId,
+        tier: freeTier,
+        device_limit: freeDeviceLimit,
+        issued_at: license.issuedAt,
+        expires_at: FREE_TIER_NO_EXPIRY,
+        state: "active" as const,
+        grace_ends_at: license.graceEndsAt ?? undefined,
+        features: { smart_workspaces: true, activity_feed: true },
+      };
+      const signature = signLicense(payload);
+      const endNow = Math.floor(Date.now() / 1000);
+      await storage.updateLicense(licenseId, {
+        expiresAt: FREE_TIER_NO_EXPIRY,
+        state: "active",
+        tier: freeTier,
+        deviceLimit: freeDeviceLimit,
+        signature,
+        renewalAt: endNow,
+        customQuota: null,
+      });
+      // Ensure free defaults apply (no stale overrides from paid plans)
+      try { await storage.updateLicenseOverridesJson(licenseId, "{}"); } catch (_) {}
+
+      emitLicenseUpdated({
+        id: license.id,
+        accountId: license.accountId,
+        state: "active",
+        tier: freeTier,
+        expiresAt: FREE_TIER_NO_EXPIRY,
+      });
+      res.json({ success: true, state: "active", tier: freeTier });
+    } catch (err) {
+      console.error("End trial now error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/licenses/:licenseId/extend", async (req, res) => {
+    try {
+      const { licenseId } = req.params;
+      const body = z.object({
+        expires_at: z.number().int().positive().optional(),
+        days_to_add: z.number().int().min(1).max(3650).optional(),
+        grace_ends_at: z.number().int().nonnegative().optional(),
+      }).refine((v) => v.expires_at != null || v.days_to_add != null, {
+        message: "Either expires_at or days_to_add is required",
+        path: ["expires_at"],
+      }).parse(req.body);
+      const license = await storage.getLicenseById(licenseId);
+      if (!license) {
+        res.status(404).json({ message: "License not found" });
+        return;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const resolvedExpiresAt =
+        body.expires_at ??
+        (Math.max(license.expiresAt, now) + (body.days_to_add as number) * TIME_UNIT_SECS);
+      const payload = {
+        license_id: license.id,
+        account_id: license.accountId,
+        tier: license.tier,
+        device_limit: license.deviceLimit,
+        issued_at: license.issuedAt,
+        expires_at: resolvedExpiresAt,
         state: "active",
         grace_ends_at: body.grace_ends_at,
         features: { smart_workspaces: true, activity_feed: true },
       };
       const signature = signLicense(payload);
       await storage.updateLicense(licenseId, {
-        expiresAt: body.expires_at,
+        expiresAt: resolvedExpiresAt,
         state: "active",
         signature,
         graceEndsAt: body.grace_ends_at ?? null,
+      });
+
+      emitLicenseUpdated({
+        id: license.id,
+        accountId: license.accountId,
+        state: "active",
+        tier: license.tier,
+        expiresAt: resolvedExpiresAt,
       });
       res.json({ success: true });
     } catch (err) {
@@ -2485,10 +2665,10 @@ export async function registerRoutes(
     try {
       const { licenseId } = req.params;
       const body = z.object({
-        tier: z.enum(["trial", "pro", "teams", "custom"]).optional(),
+        tier: z.enum(["trial", "pro", "teams", "custom", "free"]).optional(),
         deviceLimit: z.number().int().min(1).max(100).optional(),
         expiresAt: z.number().int().positive().optional(),
-        state: z.enum(["trial_active", "active", "grace", "expired", "revoked", "suspended"]).optional(),
+        state: z.enum(["active", "revoked"]).optional(),
         customQuota: z.number().int().min(0).max(10000).nullable().optional(),
         extendTrialDays: z.number().int().min(1).max(365).optional(),
         extendDuration: z.enum(["7d", "30d", "90d", "180d", "365d"]).optional(),
@@ -2518,17 +2698,47 @@ export async function registerRoutes(
         signature?: string;
       } = {};
 
-      if (body.tier !== undefined) updates.tier = body.tier;
-      if (body.deviceLimit !== undefined) updates.deviceLimit = body.deviceLimit;
+      if (body.tier !== undefined) {
+        updates.tier = body.tier === "free" ? "FREE" : body.tier;
+        // When tier changes, reset the billing cycle so share counts restart from 0
+        const normalizedNewTier = updates.tier as string;
+        const normalizedCurrentTier = (license.tier || "").toUpperCase();
+        if (normalizedNewTier !== normalizedCurrentTier) {
+          updates.renewalAt = Math.floor(Date.now() / 1000);
+        }
+        if (body.tier === "free") {
+          updates.state = "active";
+          updates.expiresAt = FREE_TIER_NO_EXPIRY;
+          updates.deviceLimit = 1;
+          // Clear any paid-plan quota overrides when downgrading to Free
+          updates.customQuota = null;
+          try { await storage.updateLicenseOverridesJson(licenseId, "{}"); } catch (_) {}
+        } else if (body.tier === "pro") {
+          if (!body.state) updates.state = "active";
+          if (!body.deviceLimit) updates.deviceLimit = 3;
+        } else if (body.tier === "teams") {
+          if (!body.state) updates.state = "active";
+          if (!body.deviceLimit) updates.deviceLimit = 9;
+        } else if (body.tier === "custom") {
+          if (!body.state) updates.state = "active";
+        } else if (body.tier === "trial") {
+          if (!body.state) updates.state = "trial_active";
+          if (!body.deviceLimit) updates.deviceLimit = 3;
+        }
+      }
+      if (body.deviceLimit !== undefined && body.tier !== "free") updates.deviceLimit = body.deviceLimit;
       if (body.state !== undefined) updates.state = body.state;
       if (body.customQuota !== undefined) updates.customQuota = body.customQuota;
 
+      const now = Math.floor(Date.now() / 1000);
+      // PostgreSQL integer is 32-bit signed; max safe value is FREE_TIER_NO_EXPIRY (2147483647)
+      const maxExpiresAt = FREE_TIER_NO_EXPIRY;
+
       if (body.expiresAt !== undefined) {
-        updates.expiresAt = body.expiresAt;
+        updates.expiresAt = Math.min(maxExpiresAt, body.expiresAt);
       } else if (body.extendTrialDays !== undefined) {
-        const currentExpires = license.expiresAt;
-        const now = Math.floor(Date.now() / 1000);
-        updates.expiresAt = Math.max(currentExpires, now) + body.extendTrialDays * 86400;
+        const base = license.expiresAt >= FREE_TIER_NO_EXPIRY ? now : Math.max(license.expiresAt, now);
+        updates.expiresAt = Math.min(maxExpiresAt, base + body.extendTrialDays * TIME_UNIT_SECS);
         if (license.state === "trial_active") {
           updates.state = "trial_active";
         }
@@ -2541,9 +2751,8 @@ export async function registerRoutes(
           "365d": 365,
         };
         const days = daysMap[body.extendDuration] || 30;
-        const currentExpires = license.expiresAt;
-        const now = Math.floor(Date.now() / 1000);
-        updates.expiresAt = Math.max(currentExpires, now) + days * 86400;
+        const base = license.expiresAt >= FREE_TIER_NO_EXPIRY ? now : Math.max(license.expiresAt, now);
+        updates.expiresAt = Math.min(maxExpiresAt, base + days * TIME_UNIT_SECS);
       }
 
       // Handle extended quota fields by updating the license billing info
@@ -2590,17 +2799,7 @@ export async function registerRoutes(
         
         // Store overrides (using the existing overrides_json column)
         const overridesStr = JSON.stringify(overrides);
-        const now = new Date().toISOString();
-        // Direct DB update for overrides_json
-        try {
-          const Database = require('better-sqlite3');
-          const dbPath = process.env.JOINCLOUD_CONTROL_PLANE_DB_PATH || require('path').join(process.cwd(), 'data', 'telemetry.db');
-          const db = new Database(dbPath);
-          db.prepare('UPDATE licenses SET overrides_json = ?, updated_at = ? WHERE id = ?').run(overridesStr, now, licenseId);
-          db.close();
-        } catch (dbErr) {
-          console.error("Failed to update overrides_json:", dbErr);
-        }
+        await storage.updateLicenseOverridesJson(licenseId, overridesStr);
       }
 
       if (Object.keys(updates).length > 0) {
@@ -2616,6 +2815,18 @@ export async function registerRoutes(
         };
         updates.signature = signLicense(payload);
         await storage.updateLicense(licenseId, updates);
+
+        const effectiveState = updates.state ?? license.state;
+        const effectiveTier = updates.tier ?? license.tier;
+        const effectiveExpiresAt = updates.expiresAt ?? license.expiresAt;
+
+        emitLicenseUpdated({
+          id: license.id,
+          accountId: license.accountId,
+          state: effectiveState,
+          tier: effectiveTier,
+          expiresAt: effectiveExpiresAt,
+        });
       }
       
       // Update billing info if any
@@ -2729,17 +2940,41 @@ export async function registerRoutes(
     try {
       const hostUuid = (req.query.host_uuid as string) || (req.headers["x-host-uuid"] as string);
       const logoutRequested = hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128 && await storage.consumeLogoutRequested(hostUuid);
-      let license = null;
+      let license: Awaited<ReturnType<typeof storage.getLicenseForHost>> = null;
       if (hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128) {
         license = await storage.getLicenseForHost(hostUuid);
+        if (!license && !logoutRequested) {
+          await storage.ensureHostRow(hostUuid);
+          const licenseId = await storage.getNextLicenseId();
+          const nowSec = Math.floor(Date.now() / 1000);
+          const signature = signLicense({
+            license_id: licenseId,
+            account_id: hostUuid,
+            tier: "FREE",
+            device_limit: 1,
+            issued_at: nowSec,
+            expires_at: FREE_TIER_NO_EXPIRY,
+            state: "active",
+          });
+          await storage.createDeviceOnlyLicense(hostUuid, "FREE", FREE_TIER_NO_EXPIRY, signature, licenseId);
+          license = await storage.getLicenseForHost(hostUuid);
+        }
       }
       const now = Math.floor(Date.now() / 1000);
       if (!license || logoutRequested) {
+        const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]);
         res.json({
           license: { state: "UNREGISTERED", tier: "", device_limit: 0, expires_at: 0, features: {} },
           activation: { required: true },
           telemetry: { default_enabled: true },
           trial_days: TRIAL_DAYS,
+          dev_mode: IS_DEV,
+          dev_trial_minutes: devTrialMins,
+          dev_expiry_warning_minutes: devWarningMins,
+          usage: {
+            sharesThisMonth: 0,
+            devicesLinked: 0,
+          },
           logout_requested: !!logoutRequested,
         });
         return;
@@ -2770,12 +3005,39 @@ export async function registerRoutes(
       } catch (_) {}
       const tier = (license.tier || "free").toLowerCase();
       const canExtendTrial = hostUuid ? await storage.canExtendDeviceTrial(hostUuid) : false;
-      const entitlements = resolveEntitlementsByState(
+      let entitlements = resolveEntitlementsByState(
         state,
         tier,
         license.expiresAt ? new Date(license.expiresAt * 1000).toISOString() : null,
         canExtendTrial
       );
+      const overrides: { shareLimitMonthly?: number; maxUsers?: number; maxDevicesPerUser?: number; maxDevicesTotal?: number; maxTeams?: number; teamEnabled?: boolean } = {};
+      if (license.overridesJson) {
+        try {
+          const parsed = JSON.parse(license.overridesJson);
+          if (parsed && typeof parsed === "object") {
+            if (typeof parsed.shareLimitMonthly === "number") overrides.shareLimitMonthly = parsed.shareLimitMonthly;
+            if (typeof parsed.maxUsers === "number") overrides.maxUsers = parsed.maxUsers;
+            if (typeof parsed.maxDevicesPerUser === "number") overrides.maxDevicesPerUser = parsed.maxDevicesPerUser;
+            if (typeof parsed.maxDevicesTotal === "number") overrides.maxDevicesTotal = parsed.maxDevicesTotal;
+            if (typeof parsed.maxTeams === "number") overrides.maxTeams = parsed.maxTeams;
+            if (typeof parsed.teamEnabled === "boolean") overrides.teamEnabled = parsed.teamEnabled;
+          }
+        } catch (_) {}
+      }
+      if (license.shareLimitMonthly != null && Number.isFinite(license.shareLimitMonthly)) {
+        overrides.shareLimitMonthly = license.shareLimitMonthly;
+      }
+      if (Object.keys(overrides).length > 0) {
+        entitlements = { ...entitlements };
+        if (overrides.shareLimitMonthly != null) entitlements.shareLimitMonthly = overrides.shareLimitMonthly;
+        if (overrides.maxUsers != null) entitlements.maxUsers = overrides.maxUsers;
+        if (overrides.maxDevicesPerUser != null) entitlements.maxDevicesPerUser = overrides.maxDevicesPerUser;
+        if (overrides.maxDevicesTotal != null) entitlements.maxDevicesTotal = overrides.maxDevicesTotal;
+        if (overrides.maxTeams != null) entitlements.maxTeams = overrides.maxTeams;
+        if (overrides.teamEnabled != null) entitlements.teamEnabled = overrides.teamEnabled;
+      }
+      const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]);
       res.json({
         license: {
           state,
@@ -2789,18 +3051,50 @@ export async function registerRoutes(
         activation: { required: false },
         telemetry: { default_enabled: true },
         trial_days: TRIAL_DAYS,
+        dev_mode: IS_DEV,
+        dev_trial_minutes: devTrialMins,
+        dev_expiry_warning_minutes: devWarningMins,
         subscription: subscription ?? undefined,
         account_id: license.accountId,
         account_email: accountEmail,
         display_name: displayName ?? "Join",
         entitlements,
+        usage: {
+          sharesThisMonth: await (async () => {
+            if (!hostUuid) return 0;
+            const nowSecConfig = Math.floor(Date.now() / 1000);
+            const anchor = license.renewalAt ?? license.issuedAt;
+            const rawCycleStart = anchor <= nowSecConfig ? anchor : license.issuedAt;
+            // For Free tier: also honour calendar-month resets so long-term Free users
+            // get a fresh count each month. Use whichever is more recent: the plan-change
+            // anchor (e.g. just downgraded) or the start of the current calendar month.
+            const isFreeTierConfig = (license.tier || "").toUpperCase() === "FREE";
+            let cycleStart = rawCycleStart;
+            if (isFreeTierConfig) {
+              const d = new Date();
+              const monthStartSec = Math.floor(new Date(d.getFullYear(), d.getMonth(), 1).getTime() / 1000);
+              cycleStart = Math.max(rawCycleStart, monthStartSec);
+            }
+            return storage.getShareCountSinceCycleStart(hostUuid, cycleStart);
+          })(),
+          devicesLinked: await storage.getLicenseHostsCount(license.id),
+        },
       });
     } catch (err) {
       console.error("Config error:", err);
+      const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]).catch(() => [DEV_TRIAL_MINUTES_DEFAULT, DEV_EXPIRY_WARNING_MINUTES_DEFAULT]);
       res.status(500).json({
         license: { state: "UNREGISTERED", tier: "", device_limit: 0, expires_at: 0, features: {} },
         activation: { required: true },
         telemetry: { default_enabled: true },
+        trial_days: TRIAL_DAYS,
+        dev_mode: IS_DEV,
+        dev_trial_minutes: devTrialMins,
+        dev_expiry_warning_minutes: devWarningMins,
+        usage: {
+          sharesThisMonth: 0,
+          devicesLinked: 0,
+        },
       });
     }
   });

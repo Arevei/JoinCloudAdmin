@@ -74,15 +74,16 @@ export default function Licenses() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [revokeId, setRevokeId] = useState<string | null>(null);
+  const [endTrialId, setEndTrialId] = useState<string | null>(null);
   const [extendId, setExtendId] = useState<string | null>(null);
   const [extendDays, setExtendDays] = useState(30);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [grantEmail, setGrantEmail] = useState("");
+  const [grantDeviceId, setGrantDeviceId] = useState("");
   const [grantTier, setGrantTier] = useState<"pro" | "teams" | "custom">("pro");
   const [customUsersOrStorage, setCustomUsersOrStorage] = useState(5);
   const [customPairingDevices, setCustomPairingDevices] = useState(5);
   const [replaceModal, setReplaceModal] = useState<{
-    email: string;
+    deviceId: string;
     tier: "pro" | "teams" | "custom";
     licenseId: string;
     existingTier: string;
@@ -93,8 +94,8 @@ export default function Licenses() {
 
   const [modifyLicense, setModifyLicense] = useState<License | null>(null);
   const [modifyForm, setModifyForm] = useState({
-    tier: "pro" as "trial" | "pro" | "teams" | "custom",
-    state: "active" as "active" | "trial_active" | "suspended" | "revoked",
+    tier: "pro" as "trial" | "pro" | "teams" | "custom" | "free",
+    state: "active" as "active" | "revoked",
     deviceLimit: 5,
     shareLimit: 200,
     userLimit: 1,
@@ -102,10 +103,16 @@ export default function Licenses() {
     devicesPerUser: 5,
     teamEnabled: false,
     extendDuration: "none" as "none" | "7d" | "30d" | "90d" | "180d" | "365d",
+    setExpiryFromToday: "none" as "none" | "1m" | "2m" | "3m" | "4m" | "5m" | "6m" | "7m" | "8m" | "9m" | "10m" | "11m" | "12m" | "1y" | "2y",
     customDays: 30,
     additionalDeviceIds: "",
     notes: "",
   });
+  const [deviceDowngradeWarning, setDeviceDowngradeWarning] = useState<{
+    newLimit: number;
+    currentCount: number;
+    pendingUpdates: Parameters<typeof modifyMutation.mutate>[0];
+  } | null>(null);
 
   const { data: licenses, isLoading, error } = useQuery<License[]>({
     queryKey: ["/api/admin/licenses"],
@@ -155,12 +162,28 @@ export default function Licenses() {
     onError: () => toast({ title: "Failed to revoke", variant: "destructive" }),
   });
 
+  const unrevokeMutation = useMutation({
+    mutationFn: async (licenseId: string) => {
+      const res = await fetch(`/api/admin/licenses/${licenseId}/unrevoke`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || "Failed to unrevoke");
+      return data as { state?: string };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
+      toast({ title: `License restored${data.state ? ` as ${data.state}` : ""}` });
+    },
+    onError: (err: Error) => toast({ title: err.message || "Failed to unrevoke", variant: "destructive" }),
+  });
+
   const extendMutation = useMutation({
-    mutationFn: async ({ licenseId, expiresAt }: { licenseId: string; expiresAt: number }) => {
+    mutationFn: async ({ licenseId, daysToAdd }: { licenseId: string; daysToAdd: number }) => {
       const res = await fetch(`/api/admin/licenses/${licenseId}/extend`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expires_at: expiresAt }),
+        body: JSON.stringify({ days_to_add: daysToAdd }),
       });
       if (!res.ok) throw new Error("Failed to extend");
     },
@@ -172,35 +195,52 @@ export default function Licenses() {
     onError: () => toast({ title: "Failed to extend", variant: "destructive" }),
   });
 
+  const endTrialMutation = useMutation({
+    mutationFn: async (licenseId: string) => {
+      const res = await fetch(`/api/admin/licenses/${licenseId}/end-trial-now`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || "Failed to end trial");
+      return data as { state?: string };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
+      setEndTrialId(null);
+      toast({ title: "Trial ended. License moved to expired state." });
+    },
+    onError: (err: Error) => toast({ title: err.message || "Failed to end trial", variant: "destructive" }),
+  });
+
   const grantMutation = useMutation({
-    mutationFn: async ({ email, tier }: { email: string; tier: "pro" | "teams" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" }) => {
       const res = await fetch("/api/admin/licenses/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, tier }),
+        body: JSON.stringify({ deviceId, tier }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || "Failed to grant license");
       return data as { success?: boolean; alreadyHasLicense?: boolean; licenseId?: string; tier?: string; expiresAt?: number };
     },
-    onSuccess: (data, { email, tier }) => {
+    onSuccess: (data, { deviceId, tier }) => {
       if (data.alreadyHasLicense) {
-        setReplaceModal({ email, tier, licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt! });
+        setReplaceModal({ deviceId, tier, licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt! });
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
-      setGrantEmail("");
-      toast({ title: `Granted ${tier} license to ${email}` });
+      setGrantDeviceId("");
+      toast({ title: `Granted ${tier} license to ${deviceId}` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantReplaceMutation = useMutation({
-    mutationFn: async ({ email, tier }: { email: string; tier: "pro" | "teams" | "custom" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" | "custom" }) => {
       const res = await fetch("/api/admin/licenses/grant-replace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, tier }),
+        body: JSON.stringify({ deviceId, tier }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -211,41 +251,41 @@ export default function Licenses() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
       setReplaceModal(null);
-      setGrantEmail("");
-      toast({ title: `Replaced with ${variables.tier} license for ${variables.email}` });
+      setGrantDeviceId("");
+      toast({ title: `Replaced with ${variables.tier} license for ${variables.deviceId}` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantCustomMutation = useMutation({
-    mutationFn: async ({ email, usersOrStorage, pairingDevices }: { email: string; usersOrStorage: number; pairingDevices: number }) => {
+    mutationFn: async ({ deviceId, usersOrStorage, pairingDevices }: { deviceId: string; usersOrStorage: number; pairingDevices: number }) => {
       const res = await fetch("/api/admin/licenses/grant-custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, usersOrStorage, pairingDevices }),
+        body: JSON.stringify({ deviceId, usersOrStorage, pairingDevices }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || "Failed to grant custom license");
       return data as { success?: boolean; alreadyHasLicense?: boolean; licenseId?: string; tier?: string; expiresAt?: number };
     },
-    onSuccess: (data, { email, usersOrStorage, pairingDevices }) => {
+    onSuccess: (data, { deviceId, usersOrStorage, pairingDevices }) => {
       if (data.alreadyHasLicense) {
-        setReplaceModal({ email, tier: "custom", licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt!, customUsersOrStorage: usersOrStorage, customPairingDevices: pairingDevices });
+        setReplaceModal({ deviceId, tier: "custom", licenseId: data.licenseId!, existingTier: data.tier!, expiresAt: data.expiresAt!, customUsersOrStorage: usersOrStorage, customPairingDevices: pairingDevices });
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
-      setGrantEmail("");
-      toast({ title: `Granted custom license (${usersOrStorage} users/storage, ${pairingDevices} devices) to ${email}. Email sent.` });
+      setGrantDeviceId("");
+      toast({ title: `Granted custom license (${usersOrStorage} users/storage, ${pairingDevices} devices) to ${deviceId}.` });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
   const grantCustomReplaceMutation = useMutation({
-    mutationFn: async ({ email, usersOrStorage, pairingDevices }: { email: string; usersOrStorage: number; pairingDevices: number }) => {
+    mutationFn: async ({ deviceId, usersOrStorage, pairingDevices }: { deviceId: string; usersOrStorage: number; pairingDevices: number }) => {
       const res = await fetch("/api/admin/licenses/grant-custom-replace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, usersOrStorage, pairingDevices }),
+        body: JSON.stringify({ deviceId, usersOrStorage, pairingDevices }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -256,8 +296,8 @@ export default function Licenses() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/licenses"] });
       setReplaceModal(null);
-      setGrantEmail("");
-      toast({ title: "Replaced with custom license. Email sent." });
+      setGrantDeviceId("");
+      toast({ title: "Replaced with custom license." });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
@@ -327,6 +367,7 @@ export default function Licenses() {
         customQuota?: number;
         extendDuration?: string;
         extendTrialDays?: number;
+        expiresAt?: number;
       }
     }) => {
       const res = await fetch(`/api/admin/licenses/${licenseId}`, {
@@ -361,16 +402,21 @@ export default function Licenses() {
       }
     }
     
+    const tierKey = (license.tier || "").toLowerCase();
+    // Normalize state: only "active" and "revoked" are admin-settable; all other states map to "active"
+    const normalizedState: "active" | "revoked" =
+      license.state === "revoked" ? "revoked" : "active";
     setModifyForm({
-      tier: license.tier as "trial" | "pro" | "teams" | "custom",
-      state: license.state as "active" | "trial_active" | "suspended" | "revoked",
+      tier: tierKey as "trial" | "pro" | "teams" | "custom" | "free",
+      state: normalizedState,
       deviceLimit: license.deviceLimit,
-      shareLimit: overrides.shareLimitMonthly ?? license.customQuota ?? (license.tier === "pro" ? 200 : license.tier === "teams" ? 1000 : 10),
+      shareLimit: overrides.shareLimitMonthly ?? license.customQuota ?? (license.tier === "PRO" || license.tier === "pro" ? 200 : license.tier === "TEAMS" || license.tier === "teams" ? 1000 : 10),
       userLimit: overrides.userLimit ?? (license.tier === "teams" ? 5 : 1),
       teamLimit: overrides.teamLimit ?? (license.tier === "teams" ? 3 : 0),
       devicesPerUser: overrides.devicesPerUser ?? 5,
       teamEnabled: license.tier === "teams" || license.tier === "custom",
       extendDuration: "none",
+      setExpiryFromToday: "none",
       customDays: 30,
       additionalDeviceIds: overrides.additionalDeviceIds?.join(", ") ?? "",
       notes: overrides.notes ?? "",
@@ -386,6 +432,7 @@ export default function Licenses() {
       customQuota?: number;
       extendDuration?: string;
       extendTrialDays?: number;
+      expiresAt?: number;
       shareLimitMonthly?: number;
       userLimit?: number;
       teamLimit?: number;
@@ -396,9 +443,16 @@ export default function Licenses() {
 
     if (modifyForm.tier !== modifyLicense.tier) {
       updates.tier = modifyForm.tier;
-    }
-    if (modifyForm.state !== modifyLicense.state) {
+      // When plan (tier) changes, always send state so DB and admin panel show correct status (e.g. active when upgrading from trial)
       updates.state = modifyForm.state;
+    }
+    if (modifyForm.state !== modifyLicense.state &&
+        !(modifyLicense.state !== "revoked" && modifyForm.state === "active")) {
+      updates.state = modifyForm.state;
+    }
+    // Always send revoked if selected (to ensure it takes effect)
+    if (modifyForm.state === "revoked" && modifyLicense.state !== "revoked") {
+      updates.state = "revoked";
     }
     if (modifyForm.deviceLimit !== modifyLicense.deviceLimit) {
       updates.deviceLimit = modifyForm.deviceLimit;
@@ -419,32 +473,66 @@ export default function Licenses() {
         .filter(Boolean);
     }
     
-    if (modifyForm.extendDuration && modifyForm.extendDuration !== "none") {
+    // Set expiry from today (1–12 months, 1y, 2y) — takes precedence over extend
+    const MAX_EXPIRY = 2147483647;
+    if (modifyForm.setExpiryFromToday && modifyForm.setExpiryFromToday !== "none") {
+      const daysMap: Record<string, number> = {
+        "1m": 30, "2m": 60, "3m": 90, "4m": 120, "5m": 150, "6m": 180,
+        "7m": 210, "8m": 240, "9m": 270, "10m": 300, "11m": 330, "12m": 360,
+        "1y": 365, "2y": 730,
+      };
+      const days = daysMap[modifyForm.setExpiryFromToday] ?? 30;
+      const nowSec = Math.floor(Date.now() / 1000);
+      updates.expiresAt = Math.min(MAX_EXPIRY, nowSec + days * 86400);
+    } else if (modifyForm.extendDuration && modifyForm.extendDuration !== "none") {
       updates.extendDuration = modifyForm.extendDuration;
+    }
+
+    // Warn admin if the new device limit is lower than current connected devices
+    const effectiveNewLimit = updates.deviceLimit ?? modifyLicense.deviceLimit;
+    const currentCount = modifyLicense.hostCount;
+    if (currentCount > effectiveNewLimit) {
+      setDeviceDowngradeWarning({ newLimit: effectiveNewLimit, currentCount, pendingUpdates: { licenseId: modifyLicense.id, updates } });
+      return;
     }
 
     modifyMutation.mutate({ licenseId: modifyLicense.id, updates });
   };
 
+  /** Execute the modify after confirming the device downgrade warning. */
+  const handleDeviceDowngradeConfirm = () => {
+    if (!deviceDowngradeWarning) return;
+    modifyMutation.mutate(deviceDowngradeWarning.pendingUpdates);
+    setDeviceDowngradeWarning(null);
+  };
+
+  /** Free tier uses this sentinel for "no expiry"; display as Never. */
+  const FREE_TIER_NO_EXPIRY = 2147483647;
   const formatDate = (ts: number) =>
     new Date(ts * 1000).toLocaleDateString("en-US", {
       month: "short",
       day: "numeric",
       year: "numeric",
     });
+  const formatExpiry = (expiresAt: number, tier?: string) => {
+    const isFreeNoExpiry =
+      (String(tier || "").toUpperCase() === "FREE" && expiresAt === FREE_TIER_NO_EXPIRY) ||
+      expiresAt >= FREE_TIER_NO_EXPIRY;
+    return isFreeNoExpiry ? "Never" : formatDate(expiresAt);
+  };
 
   const getPlanDisplay = (tier: string): { label: string; color: string } => {
+    const t = (tier || "").toLowerCase();
     const colors: Record<string, string> = {
       trial: "bg-blue-500/20 text-blue-400",
       pro: "bg-emerald-500/20 text-emerald-400",
       teams: "bg-purple-500/20 text-purple-400",
       custom: "bg-amber-500/20 text-amber-400",
+      free: "bg-slate-500/20 text-slate-400",
     };
-    
-    if (tier === "pro" || tier === "teams" || tier === "custom" || tier === "trial") {
-      return { label: tier.charAt(0).toUpperCase() + tier.slice(1), color: colors[tier] };
+    if (t === "free" || t === "pro" || t === "teams" || t === "custom" || t === "trial") {
+      return { label: t.charAt(0).toUpperCase() + t.slice(1), color: colors[t] };
     }
-    
     return { label: tier?.toUpperCase() || "—", color: "bg-muted" };
   };
 
@@ -504,7 +592,7 @@ export default function Licenses() {
       <div className="mb-6">
         <h1 className="text-2xl font-display font-bold text-white mb-1">Licenses</h1>
         <p className="text-muted-foreground text-sm">
-          Grant Pro or Teams access to an account • {licenses?.length ?? 0} total
+          Grant Pro or Teams access to a device • {licenses?.length ?? 0} total
         </p>
       </div>
 
@@ -514,16 +602,16 @@ export default function Licenses() {
             <UserPlus className="w-5 h-5" />
             Grant license
           </CardTitle>
-          <CardDescription>Grant Pro, Teams, or Custom plan by email. Account is created if it does not exist. Pro/ Custom grants send license data by email when SMTP is configured.</CardDescription>
+          <CardDescription>Grant Pro, Teams, or Custom plan by device ID. If the device already has a license, you can replace the current plan.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap items-end gap-4">
           <div className="flex-1 min-w-[200px]">
-            <label className="text-sm text-muted-foreground block mb-1">Email</label>
+            <label className="text-sm text-muted-foreground block mb-1">Device ID</label>
             <input
-              type="email"
-              value={grantEmail}
-              onChange={(e) => setGrantEmail(e.target.value)}
-              placeholder="user@example.com"
+              type="text"
+              value={grantDeviceId}
+              onChange={(e) => setGrantDeviceId(e.target.value)}
+              placeholder="paste device UUID"
               className="w-full rounded border bg-background px-3 py-2 text-sm"
             />
           </div>
@@ -567,17 +655,17 @@ export default function Licenses() {
           )}
           <Button
             onClick={() => {
-              const email = grantEmail.trim();
-              if (!email) return;
+              const deviceId = grantDeviceId.trim();
+              if (!deviceId) return;
               if (grantTier === "custom") {
-                grantCustomMutation.mutate({ email, usersOrStorage: customUsersOrStorage, pairingDevices: customPairingDevices });
+                grantCustomMutation.mutate({ deviceId, usersOrStorage: customUsersOrStorage, pairingDevices: customPairingDevices });
               } else {
-                grantMutation.mutate({ email, tier: grantTier });
+                grantMutation.mutate({ deviceId, tier: grantTier });
               }
             }}
             disabled={
               (grantTier === "custom" ? grantCustomMutation.isPending : grantMutation.isPending) ||
-              !grantEmail.trim()
+              !grantDeviceId.trim()
             }
           >
             {grantTier === "custom" ? (grantCustomMutation.isPending ? "Granting…" : "Grant custom") : grantMutation.isPending ? "Granting…" : "Grant license"}
@@ -659,7 +747,7 @@ export default function Licenses() {
                       <TableCell>
                         {l.hostCount} / {l.deviceLimit}
                       </TableCell>
-                      <TableCell>{formatDate(l.expiresAt)}</TableCell>
+                      <TableCell>{formatExpiry(l.expiresAt, l.tier)}</TableCell>
                       <TableCell className="text-muted-foreground text-xs">
                         {l.renewalAt ? `Renewal: ${formatDate(l.renewalAt)}` : null}
                         {l.graceEndsAt ? (
@@ -668,16 +756,14 @@ export default function Licenses() {
                         {!l.renewalAt && !l.graceEndsAt ? "—" : null}
                       </TableCell>
                       <TableCell className="text-right space-x-2">
-                        {l.state !== "revoked" && (
-                          <Button
-                            variant="default"
-                            size="sm"
-                            onClick={() => openModifyDialog(l)}
-                          >
-                            <Settings className="w-3 h-3 mr-1" />
-                            Modify
-                          </Button>
-                        )}
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={() => openModifyDialog(l)}
+                        >
+                          <Settings className="w-3 h-3 mr-1" />
+                          Modify
+                        </Button>
                         {l.state !== "revoked" && (
                           <Button
                             variant="outline"
@@ -688,6 +774,17 @@ export default function Licenses() {
                             Revoke
                           </Button>
                         )}
+                        {l.state === "revoked" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => unrevokeMutation.mutate(l.id)}
+                            disabled={unrevokeMutation.isPending}
+                          >
+                            <ShieldCheck className="w-3 h-3 mr-1" />
+                            {unrevokeMutation.isPending ? "Restoring..." : "Unrevoke"}
+                          </Button>
+                        )}
                         {(l.state === "active" || l.state === "trial_active" || l.state === "grace") && (
                           <Button
                             variant="outline"
@@ -696,6 +793,16 @@ export default function Licenses() {
                           >
                             <CalendarPlus className="w-3 h-3 mr-1" />
                             Extend
+                          </Button>
+                        )}
+                        {l.state !== "revoked" && l.state !== "expired" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setEndTrialId(l.id)}
+                          >
+                            <Clock className="w-3 h-3 mr-1" />
+                            End Plan Now
                           </Button>
                         )}
                       </TableCell>
@@ -852,11 +959,7 @@ export default function Licenses() {
             <AlertDialogAction
               onClick={() => {
                 if (!extendId) return;
-                const now = Math.floor(Date.now() / 1000);
-                const license = licenses?.find((l) => l.id === extendId);
-                const currentExpires = license?.expiresAt ?? now;
-                const newExpires = Math.max(currentExpires, now) + extendDays * 86400;
-                extendMutation.mutate({ licenseId: extendId, expiresAt: newExpires });
+                extendMutation.mutate({ licenseId: extendId, daysToAdd: extendDays });
               }}
             >
               Extend
@@ -865,14 +968,34 @@ export default function Licenses() {
         </AlertDialogContent>
       </AlertDialog>
 
+      <AlertDialog open={!!endTrialId} onOpenChange={() => setEndTrialId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>End plan immediately?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will end the selected plan now and move the license to the free plan (expired state, free limits apply).
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => endTrialId && endTrialMutation.mutate(endTrialId)}
+              className="bg-destructive text-destructive-foreground"
+            >
+              End plan now
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={!!replaceModal} onOpenChange={(open) => !open && setReplaceModal(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>This email already has a license</AlertDialogTitle>
+            <AlertDialogTitle>This device already has a license</AlertDialogTitle>
             <AlertDialogDescription>
               {replaceModal && (
                 <>
-                  <strong>{replaceModal.email}</strong> already has an active license: <strong>{replaceModal.existingTier}</strong> (expires {formatDate(replaceModal.expiresAt)}).
+                  <strong>{replaceModal.deviceId}</strong> already has an active license: <strong>{replaceModal.existingTier}</strong> (expires {formatExpiry(replaceModal.expiresAt, replaceModal.existingTier)}).
                   Do you want to replace it with a new license?
                 </>
               )}
@@ -885,12 +1008,12 @@ export default function Licenses() {
                 if (!replaceModal) return;
                 if (replaceModal.tier === "custom" && replaceModal.customUsersOrStorage != null && replaceModal.customPairingDevices != null) {
                   grantCustomReplaceMutation.mutate({
-                    email: replaceModal.email,
+                    deviceId: replaceModal.deviceId,
                     usersOrStorage: replaceModal.customUsersOrStorage,
                     pairingDevices: replaceModal.customPairingDevices,
                   });
                 } else if (replaceModal.tier !== "custom") {
-                  grantReplaceMutation.mutate({ email: replaceModal.email, tier: replaceModal.tier });
+                  grantReplaceMutation.mutate({ deviceId: replaceModal.deviceId, tier: replaceModal.tier });
                 }
               }}
               disabled={
@@ -905,9 +1028,33 @@ export default function Licenses() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Device Downgrade Warning */}
+      <AlertDialog open={!!deviceDowngradeWarning} onOpenChange={(open) => !open && setDeviceDowngradeWarning(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Device limit lower than current connections</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deviceDowngradeWarning && (
+                <>
+                  This license currently has <strong>{deviceDowngradeWarning.currentCount}</strong> device{deviceDowngradeWarning.currentCount !== 1 ? "s" : ""} connected, but the new limit is <strong>{deviceDowngradeWarning.newLimit}</strong>.
+                  <br /><br />
+                  Existing connected devices above the limit will continue to work until they re-authenticate. Please manually remove excess devices from the license device list to bring the count within the new limit.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setDeviceDowngradeWarning(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDeviceDowngradeConfirm}>
+              Proceed anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Modify License Dialog */}
       <Dialog open={!!modifyLicense} onOpenChange={(open) => !open && setModifyLicense(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="w-[min(56rem,calc(100vw-2rem))] max-w-3xl overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="w-5 h-5" />
@@ -918,18 +1065,18 @@ export default function Licenses() {
                 <>
                   Modify settings for <strong>{modifyLicense.accountEmail || "Anonymous Device"}</strong>
                   <br />
-                  <span className="text-xs font-mono text-muted-foreground">ID: {modifyLicense.id}</span>
+                  <span className="text-xs font-mono text-muted-foreground line-clamp-1">ID: {modifyLicense.id}</span>
                 </>
               )}
             </DialogDescription>
           </DialogHeader>
 
           {modifyLicense && (
-            <div className="space-y-5 py-4 max-h-[60vh] overflow-y-auto pr-2">
+            <div className="space-y-5 py-4 max-h-[70vh] overflow-y-auto pr-2">
               {/* License State */}
               <div className="space-y-2">
                 <Label className="flex items-center gap-2">
-                  {modifyForm.state === "suspended" ? <ShieldAlert className="w-4 h-4 text-red-500" /> : <ShieldCheck className="w-4 h-4" />}
+                  {modifyForm.state === "revoked" ? <ShieldAlert className="w-4 h-4 text-red-500" /> : <ShieldCheck className="w-4 h-4" />}
                   License State
                 </Label>
                 <Select
@@ -941,14 +1088,12 @@ export default function Licenses() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="trial_active">Trial Active</SelectItem>
-                    <SelectItem value="suspended">Suspended</SelectItem>
                     <SelectItem value="revoked">Revoked</SelectItem>
                   </SelectContent>
                 </Select>
-                {modifyForm.state === "suspended" && (
+                {modifyForm.state === "revoked" && (
                   <p className="text-xs text-yellow-500">
-                    Suspending will block all devices linked to this license.
+                    Revoking will permanently block all devices linked to this license.
                   </p>
                 )}
               </div>
@@ -961,7 +1106,17 @@ export default function Licenses() {
                 </Label>
                 <Select
                   value={modifyForm.tier}
-                  onValueChange={(v) => setModifyForm((f) => ({ ...f, tier: v as typeof f.tier }))}
+                  onValueChange={(v) => {
+                    const tierDefaults: Record<string, { deviceLimit: number; shareLimit: number }> = {
+                      free:   { deviceLimit: 1,  shareLimit: 10  },
+                      trial:  { deviceLimit: 3,  shareLimit: 50  },
+                      pro:    { deviceLimit: 3,  shareLimit: 50  },
+                      teams:  { deviceLimit: 9,  shareLimit: 100 },
+                      custom: { deviceLimit: 5,  shareLimit: 10  },
+                    };
+                    const def = tierDefaults[v] ?? {};
+                    setModifyForm((f) => ({ ...f, tier: v as typeof f.tier, state: "active", ...def }));
+                  }}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -970,6 +1125,7 @@ export default function Licenses() {
                     {(modifyLicense.state === "trial_active" || modifyForm.tier === "trial") && (
                       <SelectItem value="trial">Trial</SelectItem>
                     )}
+                    <SelectItem value="free">Free</SelectItem>
                     <SelectItem value="pro">Pro</SelectItem>
                     <SelectItem value="teams">Teams</SelectItem>
                     <SelectItem value="custom">Custom</SelectItem>
@@ -977,7 +1133,54 @@ export default function Licenses() {
                 </Select>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              {/* Expiry date — read-only, shown below Plan Tier and Status */}
+              <div className="space-y-1 rounded-md border border-border bg-muted/30 px-3 py-2">
+                <p className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Current Expiry
+                </p>
+                <p className="text-sm font-semibold">
+                  {formatExpiry(modifyLicense.expiresAt, modifyLicense.tier)}
+                </p>
+              </div>
+
+              {/* Set expiry from today — use when current is "Never" or to reset to a fixed period */}
+              <div className="space-y-2">
+                <Label className="flex items-center gap-2 text-muted-foreground text-xs">
+                  <Clock className="w-3 h-3" />
+                  Set expiry from today
+                </Label>
+                <Select
+                  value={modifyForm.setExpiryFromToday}
+                  onValueChange={(v) => setModifyForm((f) => ({ ...f, setExpiryFromToday: v as typeof f.setExpiryFromToday }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="No change" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No change</SelectItem>
+                    <SelectItem value="1m">1 month from today</SelectItem>
+                    <SelectItem value="2m">2 months from today</SelectItem>
+                    <SelectItem value="3m">3 months from today</SelectItem>
+                    <SelectItem value="4m">4 months from today</SelectItem>
+                    <SelectItem value="5m">5 months from today</SelectItem>
+                    <SelectItem value="6m">6 months from today</SelectItem>
+                    <SelectItem value="7m">7 months from today</SelectItem>
+                    <SelectItem value="8m">8 months from today</SelectItem>
+                    <SelectItem value="9m">9 months from today</SelectItem>
+                    <SelectItem value="10m">10 months from today</SelectItem>
+                    <SelectItem value="11m">11 months from today</SelectItem>
+                    <SelectItem value="12m">12 months from today</SelectItem>
+                    <SelectItem value="1y">1 year from today</SelectItem>
+                    <SelectItem value="2y">2 years from today</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Overrides current expiry. Use &quot;Extend License&quot; below to add time to current expiry.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Device Limit */}
                 <div className="space-y-2">
                   <Label className="flex items-center gap-2">
@@ -1012,7 +1215,7 @@ export default function Licenses() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Share Limit */}
                 <div className="space-y-2">
                   <Label className="flex items-center gap-2">
@@ -1049,7 +1252,7 @@ export default function Licenses() {
 
               {/* Team Limit */}
               {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label className="flex items-center gap-2">
                       <Users className="w-4 h-4" />
@@ -1118,7 +1321,7 @@ export default function Licenses() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Current expiry: {formatDate(modifyLicense.expiresAt)}
+                  Current expiry: {formatExpiry(modifyLicense.expiresAt, modifyLicense.tier)}
                 </p>
               </div>
 
