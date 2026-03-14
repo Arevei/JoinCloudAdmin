@@ -35,9 +35,9 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     teamEnabled: false,
     maxTeams: 0,
     maxUsers: 1,
-    maxDevicesPerUser: 5,
-    maxDevicesTotal: 5,
-    shareLimitMonthly: 10,
+    maxDevicesPerUser: 1,
+    maxDevicesTotal: 1,       // 1 device only on free tier
+    shareLimitMonthly: 10,    // 10 shares/month
     peerChatEnabled: true,
     canExtendTrial: true,
     uiTeasers: { showTeamsMenu: false, teamsLocked: true },
@@ -46,20 +46,20 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     teamEnabled: false,
     maxTeams: 0,
     maxUsers: 1,
-    maxDevicesPerUser: 5,
-    maxDevicesTotal: 5,
-    shareLimitMonthly: 200,
+    maxDevicesPerUser: 3,
+    maxDevicesTotal: 3,       // 3 devices on pro
+    shareLimitMonthly: 50,    // 50 shares/month
     peerChatEnabled: true,
     canExtendTrial: false,
     uiTeasers: { showTeamsMenu: false, teamsLocked: true },
   },
   TEAMS: {
     teamEnabled: true,
-    maxTeams: 2,
-    maxUsers: 5,
-    maxDevicesPerUser: 5,
-    maxDevicesTotal: 25,
-    shareLimitMonthly: 1000,
+    maxTeams: 3,              // up to 3 team spaces
+    maxUsers: 3,              // up to 3 users
+    maxDevicesPerUser: 3,     // 3 devices per user
+    maxDevicesTotal: 9,       // 3 users × 3 devices
+    shareLimitMonthly: 100,   // 100 shares/month per user
     peerChatEnabled: true,
     canExtendTrial: false,
     uiTeasers: { showTeamsMenu: true, teamsLocked: false },
@@ -99,9 +99,10 @@ export function resolveEntitlementsByState(
       teamEnabled: true,
       maxTeams: null,
       maxUsers: null,
-      maxDevicesPerUser: null,
-      maxDevicesTotal: null,
-      shareLimitMonthly: null,
+      // Trial uses Pro-like usage/device limits while preserving trial UX flow.
+      maxDevicesPerUser: 3,
+      maxDevicesTotal: 3,
+      shareLimitMonthly: 50,
       peerChatEnabled: true,
       canExtendTrial,
       uiTeasers: { showTeamsMenu: true, teamsLocked: false },

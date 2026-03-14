@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { signLicense } from "./license-sign";
+import { secondsFromDayUnits } from "./license-time";
 
 const GRACE_PERIOD_DAYS = 7;
 
@@ -49,7 +50,7 @@ export async function runSubscriptionCheck(): Promise<SubscriptionCheckResult> {
             // Still in grace period - already marked as past_due
           } else {
             // Start grace period
-            const graceEndsAt = now + GRACE_PERIOD_DAYS * 24 * 60 * 60;
+            const graceEndsAt = now + secondsFromDayUnits(GRACE_PERIOD_DAYS);
             await storage.updateSubscription(subscription.id, {
               status: "past_due",
               graceEndsAt,
@@ -229,16 +230,16 @@ export async function handlePaymentSuccess(
   if (subscription.status === "suspended" || subscription.status === "past_due") {
     const now = Math.floor(Date.now() / 1000);
     const newPeriodEnd = subscription.interval === "year"
-      ? now + 365 * 24 * 60 * 60
-      : now + 30 * 24 * 60 * 60;
+      ? now + secondsFromDayUnits(365)
+      : now + secondsFromDayUnits(30);
     
     await unsuspendSubscription(subscriptionId, newPeriodEnd);
   } else {
     // Update period end for active subscription
     const now = Math.floor(Date.now() / 1000);
     const newPeriodEnd = subscription.interval === "year"
-      ? now + 365 * 24 * 60 * 60
-      : now + 30 * 24 * 60 * 60;
+      ? now + secondsFromDayUnits(365)
+      : now + secondsFromDayUnits(30);
     
     const nextMonth = new Date(newPeriodEnd * 1000);
     nextMonth.setDate(2);
@@ -308,7 +309,7 @@ export async function handlePaymentFailed(
   // If not already in grace/suspended, start grace period
   if (subscription.status === "active") {
     const now = Math.floor(Date.now() / 1000);
-    const graceEndsAt = now + GRACE_PERIOD_DAYS * 24 * 60 * 60;
+    const graceEndsAt = now + secondsFromDayUnits(GRACE_PERIOD_DAYS);
 
     await storage.updateSubscription(subscriptionId, {
       status: "past_due",
