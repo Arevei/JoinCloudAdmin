@@ -17,7 +17,11 @@ import {
   usageReportSchema,
   signedLicensePayloadSchema,
 } from "@shared/schema";
+import { eq } from "drizzle-orm";
+import { db } from "./db";
+import { tunnels } from "@shared/schema";
 import { signToken, requireAuth, authRateLimit } from "./auth";
+import { cfRequest } from "./cloudflare";
 import { signLicense, verifyLicenseSignature } from "./license-sign";
 import {
   type EntitlementsResponse,
@@ -3838,6 +3842,154 @@ export async function registerRoutes(
     } catch (err) {
       console.error("Admin payments error:", err);
       res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === TUNNEL PROVISIONING (Remote Access) — keyed by hostId, no account auth ===
+
+  const HOST_ID_REGEX = /^[a-zA-Z0-9_-]{8,128}$/;
+  function validateHostId(hostId: unknown): hostId is string {
+    return typeof hostId === "string" && HOST_ID_REGEX.test(hostId);
+  }
+
+  app.post("/api/v1/tunnel/provision", async (req, res) => {
+    try {
+      const hostId = req.body?.hostId;
+      if (!validateHostId(hostId)) {
+        return res.status(400).json({ message: "Invalid hostId" });
+      }
+      const existing = await db.select().from(tunnels).where(eq(tunnels.hostId, hostId)).limit(1);
+      if (existing.length > 0) {
+        const t = existing[0];
+        return res.json({
+          tunnelId: t.tunnelId,
+          tunnelName: t.tunnelName,
+          subdomain: t.subdomain,
+          publicUrl: t.publicUrl,
+          credentialsJson: t.credentialsJson,
+          alreadyExisted: true,
+        });
+      }
+
+      const tunnelBaseDomain = process.env.CLOUDFLARE_TUNNEL_BASE_DOMAIN;
+      const accountIdEnv = process.env.CLOUDFLARE_ACCOUNT_ID;
+      const zoneId = process.env.CLOUDFLARE_ZONE_ID;
+      if (!tunnelBaseDomain || !accountIdEnv || !zoneId || !process.env.CLOUDFLARE_API_TOKEN) {
+        return res.status(503).json({ message: "Cloudflare tunnel not configured" });
+      }
+
+      const short = hostId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "");
+      const tunnelName = `jc-${short}`;
+      const subdomain = short + "-share." + tunnelBaseDomain;
+
+      const tunnelSecret = crypto.randomBytes(32).toString("base64");
+      const cfTunnel = await cfRequest<{ id: string }>(
+        "POST",
+        `/accounts/${accountIdEnv}/cfd_tunnel`,
+        { name: tunnelName, tunnel_secret: tunnelSecret }
+      );
+
+      await cfRequest("POST", `/zones/${zoneId}/dns_records`, {
+        type: "CNAME",
+        name: short + "-share",
+        content: `${cfTunnel.id}.cfargotunnel.com`,
+        proxied: true,
+        ttl: 1,
+      });
+
+      const credentialsJson = JSON.stringify({
+        AccountTag: accountIdEnv,
+        TunnelSecret: tunnelSecret,
+        TunnelID: cfTunnel.id,
+      });
+
+      const now = new Date().toISOString();
+      await db.insert(tunnels).values({
+        id: crypto.randomUUID(),
+        hostId,
+        tunnelId: cfTunnel.id,
+        tunnelName,
+        subdomain,
+        publicUrl: `https://${subdomain}`,
+        credentialsJson,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      return res.json({
+        tunnelId: cfTunnel.id,
+        tunnelName,
+        subdomain,
+        publicUrl: `https://${subdomain}`,
+        credentialsJson,
+        alreadyExisted: false,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Cloudflare API error";
+      return res.status(502).json({ message });
+    }
+  });
+
+  app.get("/api/v1/tunnel/status", async (req, res) => {
+    try {
+      const hostId = req.query?.hostId;
+      if (!validateHostId(hostId)) {
+        return res.status(400).json({ message: "Invalid hostId" });
+      }
+      const rows = await db.select().from(tunnels).where(eq(tunnels.hostId, hostId)).limit(1);
+      if (rows.length === 0) {
+        return res.json({ provisioned: false });
+      }
+      const t = rows[0];
+      return res.json({
+        provisioned: true,
+        tunnelId: t.tunnelId,
+        tunnelName: t.tunnelName,
+        subdomain: t.subdomain,
+        publicUrl: t.publicUrl,
+        status: t.status,
+      });
+    } catch (_) {
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.delete("/api/v1/tunnel", async (req, res) => {
+    try {
+      const hostId = req.body?.hostId;
+      if (!validateHostId(hostId)) {
+        return res.status(400).json({ message: "Invalid hostId" });
+      }
+      const rows = await db.select().from(tunnels).where(eq(tunnels.hostId, hostId)).limit(1);
+      if (rows.length === 0) {
+        return res.status(404).json({ message: "Tunnel not found" });
+      }
+      const tunnel = rows[0];
+      const accountIdEnv = process.env.CLOUDFLARE_ACCOUNT_ID;
+      const zoneId = process.env.CLOUDFLARE_ZONE_ID;
+      if (!accountIdEnv || !zoneId) {
+        return res.status(503).json({ message: "Cloudflare not configured" });
+      }
+
+      await cfRequest(
+        "DELETE",
+        `/accounts/${accountIdEnv}/cfd_tunnel/${tunnel.tunnelId}`
+      );
+
+      const records = await cfRequest<Array<{ id: string }>>(
+        "GET",
+        `/zones/${zoneId}/dns_records?name=${encodeURIComponent(tunnel.subdomain)}`
+      );
+      if (Array.isArray(records) && records.length > 0) {
+        await cfRequest("DELETE", `/zones/${zoneId}/dns_records/${records[0].id}`);
+      }
+
+      await db.delete(tunnels).where(eq(tunnels.id, tunnel.id));
+      return res.json({ success: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Cloudflare API error";
+      return res.status(502).json({ message });
     }
   });
 

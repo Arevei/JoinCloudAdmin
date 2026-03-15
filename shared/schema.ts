@@ -151,6 +151,19 @@ export const accounts = pgTable("accounts", {
   referralCodeIdx: index("idx_accounts_referral_code").on(table.referralCode),
 }));
 
+export const tunnels = pgTable("tunnels", {
+  id: text("id").primaryKey(),
+  hostId: text("host_id").notNull().unique(),
+  tunnelId: text("tunnel_id").notNull().unique(),
+  tunnelName: text("tunnel_name").notNull(),
+  subdomain: text("subdomain").notNull().unique(),
+  publicUrl: text("public_url").notNull(),
+  credentialsJson: text("credentials_json").notNull(),
+  status: text("status").notNull().default("active"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const licenses = pgTable("licenses", {
   id: text("id").primaryKey(),
   accountId: text("account_id").notNull().references(() => accounts.id),
