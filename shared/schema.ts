@@ -164,6 +164,18 @@ export const tunnels = pgTable("tunnels", {
   updatedAt: text("updated_at").notNull(),
 });
 
+export const publicShareLinks = pgTable("public_share_links", {
+  id: text("id").primaryKey(),
+  shortId: text("short_id").notNull().unique(),
+  tunnelUrl: text("tunnel_url").notNull(),
+  shareId: text("share_id").notNull(),
+  hostId: text("host_id").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => ({
+  shareIdIdx: index("idx_public_share_links_share_id").on(table.shareId),
+}));
+
 export const licenses = pgTable("licenses", {
   id: text("id").primaryKey(),
   accountId: text("account_id").notNull().references(() => accounts.id),

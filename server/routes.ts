@@ -19,7 +19,7 @@ import {
 } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { db } from "./db";
-import { tunnels } from "@shared/schema";
+import { tunnels, publicShareLinks } from "@shared/schema";
 import { signToken, requireAuth, authRateLimit } from "./auth";
 import { cfRequest } from "./cloudflare";
 import { signLicense, verifyLicenseSignature } from "./license-sign";
@@ -3990,6 +3990,96 @@ export async function registerRoutes(
     } catch (err) {
       const message = err instanceof Error ? err.message : "Cloudflare API error";
       return res.status(502).json({ message });
+    }
+  });
+
+  // === PUBLIC SHARE LINK REGISTRATION (no auth; desktop app calls with hostId) ===
+
+  const SHARE_ID_REGEX = /^[a-zA-Z0-9]{10,60}$/;
+  function validateShareRegisterBody(body: unknown): { hostId: string; tunnelUrl: string; shareId: string; expiresAt: string } | null {
+    if (!body || typeof body !== "object") return null;
+    const b = body as Record<string, unknown>;
+    const hostId = b.hostId;
+    const tunnelUrl = b.tunnelUrl;
+    const shareId = b.shareId;
+    const expiresAt = b.expiresAt;
+    if (!validateHostId(hostId)) return null;
+    if (typeof tunnelUrl !== "string" || !tunnelUrl.startsWith("https://")) return null;
+    if (typeof shareId !== "string" || !SHARE_ID_REGEX.test(shareId)) return null;
+    if (typeof expiresAt !== "string") return null;
+    const expDate = new Date(expiresAt);
+    if (Number.isNaN(expDate.getTime())) return null;
+    return { hostId, tunnelUrl, shareId, expiresAt };
+  }
+
+  app.post("/api/v1/share/register", async (req, res) => {
+    try {
+      const parsed = validateShareRegisterBody(req.body);
+      if (!parsed) {
+        return res.status(400).json({ message: "Invalid body: hostId (8-128 alphanumeric+_-), tunnelUrl (https://...), shareId (10-60 alphanumeric), expiresAt (ISO date)" });
+      }
+      const { hostId, tunnelUrl, shareId, expiresAt } = parsed;
+
+      const existing = await db.select().from(publicShareLinks).where(eq(publicShareLinks.shareId, shareId)).limit(1);
+      if (existing.length > 0) {
+        const shortId = existing[0].shortId;
+        return res.json({
+          shortId,
+          publicUrl: `https://share.joincloud.cloud/s/${shortId}`,
+        });
+      }
+
+      const shortId = crypto.randomBytes(6).toString("base64url");
+      const now = new Date().toISOString();
+      await db.insert(publicShareLinks).values({
+        id: crypto.randomUUID(),
+        shortId,
+        tunnelUrl,
+        shareId,
+        hostId,
+        expiresAt,
+        createdAt: now,
+      });
+
+      return res.json({
+        shortId,
+        publicUrl: `https://share.joincloud.cloud/s/${shortId}`,
+      });
+    } catch (err) {
+      console.error("Share register error:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // === SHORT LINK REDIRECT (GET /s/:shortId) — HTML responses for browser visits ===
+
+  app.get("/s/:shortId", async (req, res) => {
+    try {
+      const shortId = req.params.shortId;
+      const rows = await db.select().from(publicShareLinks).where(eq(publicShareLinks.shortId, shortId)).limit(1);
+      if (rows.length === 0) {
+        res.status(404).setHeader("Content-Type", "text/html").send("<h2>Share link not found or expired</h2>");
+        return;
+      }
+      const shareLink = rows[0];
+      const expiresAtMs = new Date(shareLink.expiresAt).getTime();
+      if (Number.isNaN(expiresAtMs) || Date.now() > expiresAtMs) {
+        res.status(410).setHeader("Content-Type", "text/html").send("<h2>This share link has expired</h2>");
+        return;
+      }
+      const signingSecret = process.env.SIGNING_SECRET;
+      if (!signingSecret) {
+        res.status(503).setHeader("Content-Type", "text/html").send("<h2>Service temporarily unavailable</h2>");
+        return;
+      }
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const payload = `${shareLink.shareId}:${exp}`;
+      const token = crypto.createHmac("sha256", signingSecret).update(payload).digest("base64url");
+      const redirectUrl = `${shareLink.tunnelUrl}/share/${shareLink.shareId}?token=${token}&exp=${exp}`;
+      res.redirect(302, redirectUrl);
+    } catch (err) {
+      console.error("Short link redirect error:", err);
+      res.status(500).setHeader("Content-Type", "text/html").send("<h2>Something went wrong</h2>");
     }
   });
 
