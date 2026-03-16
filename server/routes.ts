@@ -4051,6 +4051,48 @@ export async function registerRoutes(
     }
   });
 
+  // === PUBLIC SHARE RESOLVE (USED BY CLOUDFLARE WORKER ONLY) ===
+
+  app.get("/api/v1/share/resolve/:shortId", async (req, res) => {
+    try {
+      const workerSecret = process.env.WORKER_SECRET;
+      const headerSecret = req.headers["x-worker-secret"];
+      if (!workerSecret || headerSecret !== workerSecret) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const shortId = req.params.shortId;
+      const rows = await db.select().from(publicShareLinks).where(eq(publicShareLinks.shortId, shortId)).limit(1);
+      if (rows.length === 0) {
+        return res.status(404).json({ message: "Share not found or expired" });
+      }
+      const shareLink = rows[0];
+      const expiresAtMs = new Date(shareLink.expiresAt).getTime();
+      if (Number.isNaN(expiresAtMs) || Date.now() > expiresAtMs) {
+        return res.status(410).json({ message: "Share link expired" });
+      }
+
+      const signingSecret = process.env.SIGNING_SECRET;
+      if (!signingSecret) {
+        return res.status(503).json({ message: "Signing secret not configured" });
+      }
+
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const payload = `${shareLink.shareId}:${exp}`;
+      const token = crypto.createHmac("sha256", signingSecret).update(payload).digest("base64url");
+
+      return res.json({
+        tunnelUrl: shareLink.tunnelUrl,
+        shareId: shareLink.shareId,
+        token,
+        exp,
+      });
+    } catch (err) {
+      console.error("Share resolve error:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   // === SHORT LINK REDIRECT (GET /s/:shortId) — HTML responses for browser visits ===
 
   app.get("/s/:shortId", async (req, res) => {
