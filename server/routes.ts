@@ -4025,7 +4025,7 @@ export async function registerRoutes(
         const shortId = existing[0].shortId;
         return res.json({
           shortId,
-          publicUrl: `https://share.joincloud.cloud/s/${shortId}`,
+          publicUrl: `https://go.joincloud.cloud/s/${shortId}`,
         });
       }
 
@@ -4043,7 +4043,7 @@ export async function registerRoutes(
 
       return res.json({
         shortId,
-        publicUrl: `https://share.joincloud.cloud/s/${shortId}`,
+        publicUrl: `https://go.joincloud.cloud/s/${shortId}`,
       });
     } catch (err) {
       console.error("Share register error:", err);
