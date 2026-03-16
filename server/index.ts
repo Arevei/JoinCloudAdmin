@@ -25,6 +25,22 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+const PUBLIC_DOMAIN = "go.joincloud.cloud";
+
+app.use((req, res, next) => {
+  const host = (req.headers.host || "").toString();
+
+  if (host === PUBLIC_DOMAIN || host.startsWith(PUBLIC_DOMAIN + ":")) {
+    if (req.path.startsWith("/s/")) {
+      return next();
+    }
+    res.status(404).send("<h2>Not found</h2>");
+    return;
+  }
+
+  next();
+});
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
