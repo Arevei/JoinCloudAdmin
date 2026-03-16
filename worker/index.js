@@ -41,6 +41,23 @@ export default {
       });
     }
 
+    // Inject tunnel base URL and token into HTML for the share page.
+    // Other content types (e.g. direct file downloads) are passed through as-is.
+    const contentType = fileRes.headers.get("content-type") || "";
+    if (contentType.startsWith("text/html")) {
+      let html = await fileRes.text();
+      const baseScript = `<script>window.__SHARE_BASE__ = "${tunnelUrl}"; window.__SHARE_TOKEN__ = "${token}"; window.__SHARE_EXP__ = "${exp}";</script>`;
+      html = html.replace("</head>", `${baseScript}</head>`);
+
+      const headers = new Headers();
+      headers.set("content-type", "text/html; charset=UTF-8");
+      headers.set("cache-control", "no-store");
+      return new Response(html, {
+        status: 200,
+        headers,
+      });
+    }
+
     const headers = new Headers();
     const ct = fileRes.headers.get("content-type");
     const cd = fileRes.headers.get("content-disposition");
