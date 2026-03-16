@@ -94,7 +94,11 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
+  // Lightweight health endpoint for Worker and desktop app status checks.
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
   // === EXISTING TELEMETRY ENDPOINTS (unchanged) ===
   
   // Telemetry Ingestion Endpoint
