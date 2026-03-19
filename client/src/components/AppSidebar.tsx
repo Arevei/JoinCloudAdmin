@@ -1,5 +1,6 @@
 import { useLocation, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
+import { useAuth } from "@/auth/AuthContext";
 import {
   Sidebar,
   SidebarContent,
@@ -25,6 +26,7 @@ import {
   Settings,
   ClipboardList,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 interface SupportThreadPreview {
   deviceUUID: string;
@@ -86,6 +88,7 @@ const menuItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
+  const { user, logout } = useAuth();
 
   const { data: threads } = useQuery<SupportThreadPreview[]>({
     queryKey: ['/api/admin/support/threads'],
@@ -148,10 +151,37 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="border-t border-white/5 p-4">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-          System Operational
-        </div>
+        {user ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs text-white font-medium truncate" title={user.email}>
+                  {user.email}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  Role: <span className="font-mono">{user.role}</span>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                onClick={() => logout()}
+              >
+                Logout
+              </Button>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+              System Operational
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
+            Not signed in
+          </div>
+        )}
       </SidebarFooter>
     </Sidebar>
   );

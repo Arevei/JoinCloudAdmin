@@ -20,7 +20,7 @@ import {
 import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { tunnels, publicShareLinks } from "@shared/schema";
-import { signToken, requireAuth, authRateLimit } from "./auth";
+import { signToken, requireAuth, authRateLimit, signAdminToken, signAccessToken, signRefreshToken, verifyRefreshToken, requireAdminAuth, requireRole, type Role } from "./auth";
 import { cfRequest } from "./cloudflare";
 import { signLicense, verifyLicenseSignature } from "./license-sign";
 import {
@@ -39,6 +39,21 @@ import { getTimeUnitSeconds, getLicenseTimeMode } from "./license-time";
 import { emitLicenseUpdated } from "./license-events";
 
 const ADMIN_VERSION = "1.0.0";
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_CALLBACK_URL = process.env.GOOGLE_CALLBACK_URL;
+const GOOGLE_ALLOWED_DOMAIN = process.env.GOOGLE_ALLOWED_DOMAIN;
+const ADMIN_SESSION_COOKIE_NAME = process.env.ADMIN_SESSION_COOKIE_NAME || "admin_session";
+const ADMIN_REFRESH_COOKIE_NAME = process.env.ADMIN_REFRESH_COOKIE_NAME || "admin_refresh";
+const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "rishabh@arevei.com").toLowerCase();
+
+function getRequestOrigin(req: any): string {
+  const host = (req.headers?.host || "").toString();
+  const protoHeader = (req.headers?.["x-forwarded-proto"] || "").toString();
+  const proto = protoHeader ? protoHeader.split(",")[0].trim() : (req.secure ? "https" : "http");
+  return host ? `${proto}://${host}` : "http://localhost:5000";
+}
 
 /** Trial duration in days for first-time sign-in (configurable via TRIAL_DAYS env, default 7). */
 const TRIAL_DAYS = Math.max(1, parseInt(process.env.TRIAL_DAYS || "7", 10) || 7);
@@ -94,9 +109,201 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  function setAdminSessionCookie(res: import("express").Response, accessToken: string, refreshToken?: string) {
+    const isProd = process.env.NODE_ENV === "production";
+    res.cookie(ADMIN_SESSION_COOKIE_NAME, accessToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 15 * 60 * 1000,  // 15 minutes
+    });
+    if (refreshToken) {
+      res.cookie(ADMIN_REFRESH_COOKIE_NAME, refreshToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: "lax",
+        path: "/",  // broad path so it is sent to /auth/refresh
+        maxAge: 30 * 24 * 60 * 60 * 1000,  // 30 days
+      });
+    }
+  }
+
+  // Token refresh endpoint: reads refresh cookie, issues new access token
+  app.post("/auth/refresh", (req, res) => {
+    const cookieHeader = req.headers.cookie || "";
+    const cookies = Object.fromEntries(
+      cookieHeader.split(";").map((c) => {
+        const [k, ...rest] = c.trim().split("=");
+        return [k, rest.join("=")];
+      })
+    );
+    const refreshToken = cookies[ADMIN_REFRESH_COOKIE_NAME];
+    if (!refreshToken) {
+      res.status(401).json({ message: "No refresh token" });
+      return;
+    }
+    const payload = verifyRefreshToken(refreshToken);
+    if (!payload || !payload.accountId || !payload.email) {
+      res.clearCookie(ADMIN_REFRESH_COOKIE_NAME, { path: "/" });
+      res.status(401).json({ message: "Invalid or expired refresh token" });
+      return;
+    }
+    const role: Role =
+      payload.role === "super_admin" || payload.role === "admin" || payload.role === "user"
+        ? payload.role
+        : "user";
+    const newAccessToken = signAccessToken({ accountId: payload.accountId, email: payload.email, role });
+    const isProd = process.env.NODE_ENV === "production";
+    res.cookie(ADMIN_SESSION_COOKIE_NAME, newAccessToken, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 15 * 60 * 1000,
+    });
+    res.json({ ok: true });
+  });
+
+  // Require authenticated admin session for all /api/admin routes
+  app.use("/api/admin", requireAdminAuth);
+
+  // Require at least 'admin' role for all mutating requests on /api/admin/*
+  app.use("/api/admin", (req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
+      return requireRole("admin")(req, res, next);
+    }
+    next();
+  });
+
+  // Google OAuth for admin panel (optional; enabled only when env vars present)
+  app.get("/auth/google", (req, res) => {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CALLBACK_URL) {
+      res.status(501).send("Google auth not configured");
+      return;
+    }
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: GOOGLE_CALLBACK_URL,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "offline",
+      prompt: "select_account",
+    });
+    res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+  });
+
+  app.get("/auth/google/callback", async (req, res) => {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_CALLBACK_URL) {
+      res.status(501).send("Google auth not configured");
+      return;
+    }
+    const code = req.query.code as string | undefined;
+    if (!code) {
+      res.status(400).send("Missing code");
+      return;
+    }
+    try {
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          redirect_uri: GOOGLE_CALLBACK_URL,
+          grant_type: "authorization_code",
+        }),
+      });
+      if (!tokenRes.ok) {
+        const text = await tokenRes.text();
+        console.error("Google token error:", text);
+        res.status(502).send("Google auth failed");
+        return;
+      }
+      const tokenJson: any = await tokenRes.json();
+      const idToken = tokenJson.id_token as string;
+      if (!idToken) {
+        res.status(502).send("Google auth failed");
+        return;
+      }
+      const [, payloadB64] = idToken.split(".");
+      const payloadJson = JSON.parse(Buffer.from(payloadB64, "base64").toString("utf8"));
+      const email = payloadJson.email as string | undefined;
+      const emailVerified = !!payloadJson.email_verified;
+
+      if (!email || !emailVerified) {
+        res.status(403).send("Email not verified");
+        return;
+      }
+      if (GOOGLE_ALLOWED_DOMAIN && !email.toLowerCase().endsWith(`@${GOOGLE_ALLOWED_DOMAIN.toLowerCase()}`)) {
+        res.status(403).send("Unauthorized domain");
+        return;
+      }
+
+      let account = await storage.getAccountByEmail(email);
+      if (!account) {
+        const id = crypto.randomUUID();
+        account = await storage.createAccount(id, email, ".");
+      }
+
+      // Determine role: super_admin email always wins; otherwise use existing adminRole
+      const isSuperAdmin = email.toLowerCase() === SUPER_ADMIN_EMAIL;
+      const existingAdminRole = account.adminRole as Role | null | undefined;
+      const assignedRole: Role | null = isSuperAdmin
+        ? "super_admin"
+        : (existingAdminRole === "super_admin" || existingAdminRole === "admin" || existingAdminRole === "user")
+          ? existingAdminRole
+          : null;
+
+      if (!assignedRole) {
+        // Not a whitelisted admin — block access
+        const ip = (req.ip || req.socket?.remoteAddress || "unknown").toString();
+        console.warn(`[AUTH WARN] Blocked unauthorized admin login attempt: ${email} from IP ${ip}`);
+        const redirectUrl = getRequestOrigin(req);
+        res.redirect(`${redirectUrl}/unauthorized`);
+        return;
+      }
+
+      // Persist the role so it's always current
+      if (account.adminRole !== assignedRole) {
+        await storage.updateAccountAdminRole(account.id, assignedRole);
+      }
+
+      const accessToken = signAccessToken({ accountId: account.id, email: account.email, role: assignedRole });
+      const refreshToken = signRefreshToken({ accountId: account.id, email: account.email, role: assignedRole });
+      setAdminSessionCookie(res, accessToken, refreshToken);
+      console.log(`[AUTH] Admin login: ${email} (${assignedRole})`);
+
+      const redirectUrl = getRequestOrigin(req);
+      res.redirect(redirectUrl);
+    } catch (err) {
+      console.error("Google callback error:", err);
+      res.status(500).send("Authentication failed");
+    }
+  });
+
+  app.post("/auth/logout", requireAdminAuth, (req, res) => {
+    res.clearCookie(ADMIN_SESSION_COOKIE_NAME, { path: "/" });
+    res.clearCookie(ADMIN_REFRESH_COOKIE_NAME, { path: "/" });
+    const admin = (req as any).admin as { email: string } | undefined;
+    if (admin) console.log(`[AUTH] Admin logout: ${admin.email}`);
+    res.status(204).end();
+  });
+
   // Lightweight health endpoint for Worker and desktop app status checks.
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
+  });
+
+  // Current admin identity for the admin panel
+  app.get("/api/me", requireAdminAuth, (req, res) => {
+    const admin = (req as any).admin as { accountId: string; email: string; role: Role };
+    res.json({
+      accountId: admin.accountId,
+      email: admin.email,
+      role: admin.role,
+    });
   });
 
   // === EXISTING TELEMETRY ENDPOINTS (unchanged) ===
@@ -207,6 +414,7 @@ export async function registerRoutes(
       const filters = {
         platform: req.query.platform as string | undefined,
         version: req.query.version as string | undefined,
+        search: req.query.search as string | undefined,
         sortBy: req.query.sortBy as string | undefined,
         sortOrder: req.query.sortOrder as string | undefined,
         page: req.query.page ? parseInt(req.query.page as string) : undefined,
@@ -1567,6 +1775,93 @@ export async function registerRoutes(
     }
   });
 
+  // Manual plan/limit requests coming from JoinCloud web
+  app.post("/api/v1/admin/manual-plan-request", async (req, res) => {
+    try {
+      const { accountId, deviceId, requestedDays, requestedShareLimit, notes } = req.body as {
+        accountId?: string;
+        deviceId?: string;
+        requestedDays?: number;
+        requestedShareLimit?: number;
+        notes?: string;
+      };
+      if (!accountId && !deviceId) {
+        res.status(400).json({ message: "accountId or deviceId is required" });
+        return;
+      }
+      const days = Number.isFinite(requestedDays as number) && requestedDays! > 0 ? requestedDays! : 30;
+      const shareLimit = Number.isFinite(requestedShareLimit as number) && requestedShareLimit! > 0 ? requestedShareLimit! : undefined;
+
+      // Find license by account or device
+      let license = null;
+      if (accountId) {
+        const account = await storage.getAccountById(accountId);
+        if (account?.id) {
+          const licenses = await storage.listLicensesWithHostCounts();
+          license = licenses.find((l) => l.accountId === account.id) ?? null;
+        }
+      }
+      if (!license && deviceId) {
+        const licenses = await storage.listLicensesWithHostCounts();
+        license = licenses.find((l) => l.firstDeviceId === deviceId) ?? null;
+      }
+      if (!license) {
+        res.status(404).json({ message: "License not found for request" });
+        return;
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expiresAt = nowSec + days * 86400;
+
+      // Apply requested expiry, reset usage cycle, and optional share limit (same as modify plans)
+      await storage.updateLicense(license.id, {
+        expiresAt,
+        customQuota: shareLimit ?? null,
+        renewalAt: nowSec,
+      });
+
+      // When share limit requested, set overrides so config returns the new limit
+      if (shareLimit != null) {
+        let overrides: Record<string, unknown> = {};
+        try {
+          const existing = await storage.getLicenseById(license.id);
+          if (existing && (existing as { overridesJson?: string }).overridesJson) {
+            overrides = JSON.parse((existing as { overridesJson: string }).overridesJson);
+          }
+        } catch (_) {
+          overrides = {};
+        }
+        overrides.shareLimitMonthly = shareLimit;
+        await storage.updateLicenseOverridesJson(license.id, JSON.stringify(overrides));
+      }
+
+      // Optionally record the request for audit/logging
+      if (notes) {
+        console.log("Manual plan request applied", {
+          licenseId: license.id,
+          accountId: license.accountId,
+          deviceId,
+          requestedDays: days,
+          requestedShareLimit: shareLimit,
+          notes,
+        });
+      }
+
+      res.json({
+        success: true,
+        licenseId: license.id,
+        applied: {
+          expiresAt,
+          requestedDays: days,
+          requestedShareLimit: shareLimit ?? null,
+        },
+      });
+    } catch (err) {
+      console.error("Manual plan request error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   // === PHASE 2: ADMIN (accounts, licenses, usage aggregates, revoke, extend) ===
   app.get("/api/admin/accounts", async (req, res) => {
     try {
@@ -1607,7 +1902,7 @@ export async function registerRoutes(
   });
 
   // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic, dev_trial_minutes, dev_expiry_warning_minutes)
-  app.get("/api/v1/admin/settings", async (req, res) => {
+  app.get("/api/v1/admin/settings", requireAdminAuth, async (req, res) => {
     try {
       const payment_mode = await storage.getSetting("payment_mode") ?? "LIVE";
       const subscription_mode = await storage.getSetting("subscription_mode") ?? "automatic";
@@ -1625,7 +1920,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/v1/admin/settings/payment-mode", async (req, res) => {
+  app.post("/api/v1/admin/settings/payment-mode", requireAdminAuth, requireRole("super_admin"), async (req, res) => {
     try {
       const body = z.object({
         payment_mode: z.enum(["LIVE", "DEV"]),
@@ -1642,7 +1937,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/v1/admin/settings/subscription-mode", async (req, res) => {
+  app.post("/api/v1/admin/settings/subscription-mode", requireAdminAuth, requireRole("super_admin"), async (req, res) => {
     try {
       const body = z.object({
         subscription_mode: z.enum(["manual", "automatic"]),
@@ -1659,7 +1954,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/v1/admin/settings/dev-trial-minutes", async (req, res) => {
+  app.post("/api/v1/admin/settings/dev-trial-minutes", requireAdminAuth, requireRole("admin"), async (req, res) => {
     try {
       const body = z.object({
         dev_trial_minutes: z.number().int().min(DEV_TRIAL_MINUTES_MIN).max(DEV_TRIAL_MINUTES_MAX),
@@ -1676,7 +1971,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/v1/admin/settings/dev-expiry-warning-minutes", async (req, res) => {
+  app.post("/api/v1/admin/settings/dev-expiry-warning-minutes", requireAdminAuth, requireRole("admin"), async (req, res) => {
     try {
       const body = z.object({
         dev_expiry_warning_minutes: z.number().int().min(0).max(60),
@@ -1722,6 +2017,9 @@ export async function registerRoutes(
       device_id: r.deviceId ?? r.device_id ?? null,
       custom_users: r.customUsers ?? r.custom_users ?? null,
       custom_devices: r.customDevices ?? r.custom_devices ?? null,
+      requested_days: r.requestedDays ?? r.requested_days ?? null,
+      requested_share_limit: r.requestedShareLimit ?? r.requested_share_limit ?? null,
+      requested_device_limit: r.requestedDeviceLimit ?? r.requested_device_limit ?? null,
       notes: r.notes ?? null,
       license_id: r.licenseId ?? r.license_id ?? null,
       approved_by: r.approvedBy ?? r.approved_by ?? null,
@@ -1741,6 +2039,9 @@ export async function registerRoutes(
         device_id: z.string().min(8).max(128).optional(),
         custom_users: z.number().int().nonnegative().optional(),
         custom_devices: z.number().int().nonnegative().optional(),
+        requested_days: z.number().int().min(1).max(365).optional(),
+        requested_share_limit: z.number().int().min(0).max(100000).optional(),
+        requested_device_limit: z.number().int().min(1).max(100).optional(),
       }).parse(req.body);
 
       const id = crypto.randomUUID();
@@ -1755,6 +2056,9 @@ export async function registerRoutes(
         deviceId: body.device_id ?? null,
         customUsers: body.custom_users ?? null,
         customDevices: body.custom_devices ?? null,
+        requestedDays: body.requested_days ?? null,
+        requestedShareLimit: body.requested_share_limit ?? null,
+        requestedDeviceLimit: body.requested_device_limit ?? null,
         notes: null,
         licenseId: null,
         approvedBy: null,
@@ -1817,13 +2121,15 @@ export async function registerRoutes(
         device_limit: z.number().int().min(1).max(100).optional(),
         expires_at: z.number().int().positive().optional(),
         custom_quota: z.number().int().min(1).optional().nullable(),
+        share_limit_monthly: z.number().int().min(0).max(100000).optional().nullable(),
         notes: z.string().max(1000).optional().nullable(),
       }).parse(req.body);
 
       const tier = (body.tier ?? (request.plan_id === "team" ? "teams" : request.plan_id)) as string;
-      const deviceLimit = body.device_limit ?? (tier === "teams" ? 5 : 5);
+      const deviceLimit = body.device_limit ?? request.requested_device_limit ?? (tier === "teams" ? 9 : 5);
       const nowSec = Math.floor(Date.now() / 1000);
-      const expiresAt = body.expires_at ?? (nowSec + 365 * 24 * 60 * 60);
+      const requestedDays = request.requested_days ?? 365;
+      const expiresAt = body.expires_at ?? (nowSec + requestedDays * 86400);
 
       // Ensure account exists
       let accountId: string;
@@ -1866,6 +2172,7 @@ export async function registerRoutes(
             state: "active",
             signature,
             customQuota: body.custom_quota ?? null,
+            renewalAt: nowSec,
           });
           await storage.ensureHostRow(request.device_id);
           await storage.addLicenseHost(existingForDevice.id, request.device_id);
@@ -1930,6 +2237,20 @@ export async function registerRoutes(
         });
       }
 
+      if (body.share_limit_monthly != null) {
+        let overrides: Record<string, unknown> = {};
+        try {
+          const existing = await storage.getLicenseById(licenseId);
+          if (existing && (existing as { overridesJson?: string }).overridesJson) {
+            overrides = JSON.parse((existing as { overridesJson: string }).overridesJson);
+          }
+        } catch (_) {
+          overrides = {};
+        }
+        overrides.shareLimitMonthly = body.share_limit_monthly;
+        await storage.updateLicenseOverridesJson(licenseId, JSON.stringify(overrides));
+      }
+
       const adminId = (req as any).user?.id ?? "admin";
       const approvedAtIso = new Date().toISOString();
       await storage.updateSubscriptionRequest(id, {
@@ -1960,6 +2281,37 @@ export async function registerRoutes(
         return;
       }
       console.error("Approve subscription request error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/subscription/requests/:id/reject", async (req, res) => {
+    try {
+      const id = req.params.id;
+      const rawRequest = await storage.getSubscriptionRequestById(id);
+      if (!rawRequest) {
+        res.status(404).json({ message: "Subscription request not found" });
+        return;
+      }
+      if (rawRequest.status !== "pending") {
+        res.status(400).json({ message: "Request is not pending" });
+        return;
+      }
+      const body = z.object({
+        notes: z.string().max(1000).optional().nullable(),
+      }).parse(req.body);
+      await storage.updateSubscriptionRequest(id, {
+        status: "rejected",
+        notes: body.notes ?? rawRequest.notes ?? null,
+      });
+      const updated = await storage.getSubscriptionRequestById(id);
+      res.json(updated ? normalizeSubscriptionRequest(updated) : null);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Reject subscription request error:", err);
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
@@ -4126,6 +4478,80 @@ export async function registerRoutes(
     } catch (err) {
       console.error("Short link redirect error:", err);
       res.status(500).setHeader("Content-Type", "text/html").send("<h2>Something went wrong</h2>");
+    }
+  });
+
+  // === ADMIN: PANEL USER MANAGEMENT (super_admin only) ===
+
+  app.get("/api/admin/panel-users", requireRole("super_admin"), async (req, res) => {
+    try {
+      const adminAccounts = await storage.listAdminPanelAccounts();
+      res.json(adminAccounts.map(a => ({
+        id: a.id,
+        email: a.email,
+        adminRole: a.adminRole,
+        createdAt: a.createdAt,
+      })));
+    } catch (err) {
+      console.error("Panel users error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/panel-users/:accountId/role", requireRole("super_admin"), async (req, res) => {
+    try {
+      const { accountId } = req.params;
+      const { role } = z.object({
+        role: z.enum(["user", "admin", "super_admin"]).nullable(),
+      }).parse(req.body);
+      const account = await storage.getAccountById(accountId);
+      if (!account) {
+        res.status(404).json({ message: "Account not found" });
+        return;
+      }
+      // Prevent downgrading the primary super_admin (env-configured)
+      if (account.email.toLowerCase() === SUPER_ADMIN_EMAIL && role !== "super_admin") {
+        res.status(403).json({ message: "Cannot change role of the primary super admin" });
+        return;
+      }
+      await storage.updateAccountAdminRole(accountId, role);
+      const admin = (req as any).admin as { email: string };
+      console.log(`[AUTH] Role change: ${account.email} → ${role ?? "none"} by ${admin?.email}`);
+      res.json({ id: accountId, adminRole: role });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Panel user role error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  // Add a new admin user by email (super_admin only)
+  app.post("/api/admin/panel-users", requireRole("super_admin"), async (req, res) => {
+    try {
+      const { email, role } = z.object({
+        email: z.string().email(),
+        role: z.enum(["user", "admin"]),
+      }).parse(req.body);
+      let account = await storage.getAccountByEmail(email);
+      if (!account) {
+        // Pre-register the account so it's ready when they log in via Google
+        const id = crypto.randomUUID();
+        account = await storage.createAccount(id, email, ".");
+      }
+      await storage.updateAccountAdminRole(account.id, role);
+      const admin = (req as any).admin as { email: string };
+      console.log(`[AUTH] Admin added: ${email} as '${role}' by ${admin?.email}`);
+      res.json({ id: account.id, email: account.email, adminRole: role });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message });
+        return;
+      }
+      console.error("Add panel user error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
     }
   });
 

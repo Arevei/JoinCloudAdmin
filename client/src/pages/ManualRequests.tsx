@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState } from "react";
+import { useCanWrite } from "@/auth/usePermission";
 
 interface SubscriptionRequest {
   id: string;
@@ -16,6 +17,9 @@ interface SubscriptionRequest {
   device_id?: string | null;
   custom_users?: number | null;
   custom_devices?: number | null;
+  requested_days?: number | null;
+  requested_share_limit?: number | null;
+  requested_device_limit?: number | null;
   notes?: string | null;
   license_id?: string | null;
   approved_by?: string | null;
@@ -24,10 +28,12 @@ interface SubscriptionRequest {
 }
 
 export default function ManualRequests() {
+  const canWrite = useCanWrite();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tier, setTier] = useState<"pro" | "teams" | "custom">("pro");
+  const [tier, setTier] = useState<"pro" | "custom">("pro");
   const [deviceLimit, setDeviceLimit] = useState<string>("5");
   const [expiryDays, setExpiryDays] = useState<string>("365");
+  const [shareLimitMonthly, setShareLimitMonthly] = useState<string>("");
   const [customQuota, setCustomQuota] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
 
@@ -56,6 +62,10 @@ export default function ManualRequests() {
       if (tier === "custom" && Number.isFinite(cq) && cq > 0) {
         body.custom_quota = cq;
       }
+      const sl = parseInt(shareLimitMonthly || "0", 10);
+      if (Number.isFinite(sl) && sl > 0) {
+        body.share_limit_monthly = sl;
+      }
       const res = await fetch(`/api/admin/subscription/requests/${selectedId}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -72,6 +82,30 @@ export default function ManualRequests() {
       setSelectedId(null);
       setNotes("");
       setCustomQuota("");
+      setShareLimitMonthly("");
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedId) throw new Error("No request selected");
+      const res = await fetch(`/api/admin/subscription/requests/${selectedId}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: notes || null }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || "Failed to reject request");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      requestsQuery.refetch();
+      setSelectedId(null);
+      setNotes("");
+      setCustomQuota("");
+      setShareLimitMonthly("");
     },
   });
 
@@ -101,10 +135,15 @@ export default function ManualRequests() {
                     type="button"
                     onClick={() => {
                       setSelectedId(r.id);
-                      const defaultTier = r.plan_id === "team" ? "teams" : (r.plan_id as "pro" | "teams" | "custom");
+                      const defaultTier = (r.plan_id === "custom" ? "custom" : "pro") as "pro" | "custom";
                       setTier(defaultTier);
-                      setDeviceLimit("5");
-                      setExpiryDays("365");
+                      setDeviceLimit(
+                        r.requested_device_limit != null ? String(r.requested_device_limit) : defaultTier === "pro" ? "5" : "5"
+                      );
+                      setExpiryDays(r.requested_days != null ? String(r.requested_days) : "365");
+                      setShareLimitMonthly(
+                        r.requested_share_limit != null ? String(r.requested_share_limit) : defaultTier === "pro" ? "50" : ""
+                      );
                       setCustomQuota("");
                       setNotes(r.notes || "");
                     }}
@@ -122,8 +161,11 @@ export default function ManualRequests() {
                           {r.phone && `· ${r.phone}`}
                         </div>
                       </div>
-                      {r.custom_users != null || r.custom_devices != null ? (
+                      {(r.custom_users != null || r.custom_devices != null || r.requested_days != null || r.requested_share_limit != null || r.requested_device_limit != null) ? (
                         <div className="text-xs text-muted-foreground text-right">
+                          {r.requested_days != null && <div>{r.requested_days} days</div>}
+                          {r.requested_share_limit != null && <div>share limit {r.requested_share_limit}</div>}
+                          {r.requested_device_limit != null && <div>{r.requested_device_limit} devices</div>}
                           {r.custom_users != null && <div>{r.custom_users} users</div>}
                           {r.custom_devices != null && <div>{r.custom_devices} devices</div>}
                         </div>
@@ -152,13 +194,12 @@ export default function ManualRequests() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs mb-1">Tier</label>
-                        <Select value={tier} onValueChange={(v) => setTier(v as "pro" | "teams" | "custom")}>
+                        <Select value={tier} onValueChange={(v) => setTier(v as "pro" | "custom")}>
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="pro">Pro</SelectItem>
-                            <SelectItem value="teams">Teams</SelectItem>
                             <SelectItem value="custom">Custom</SelectItem>
                           </SelectContent>
                         </Select>
@@ -183,8 +224,21 @@ export default function ManualRequests() {
                           min={1}
                           value={expiryDays}
                           onChange={(e) => setExpiryDays(e.target.value)}
+                          placeholder="e.g. 365"
                         />
                       </div>
+                      <div>
+                        <label className="block text-xs mb-1">Share limit (monthly)</label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={shareLimitMonthly}
+                          onChange={(e) => setShareLimitMonthly(e.target.value)}
+                          placeholder="e.g. 50 for Pro, reset 0 on approve"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs mb-1">Custom quota (users/storage)</label>
                         <Input
@@ -216,9 +270,17 @@ export default function ManualRequests() {
                         Cancel
                       </Button>
                       <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => rejectMutation.mutate()}
+                        disabled={!canWrite || rejectMutation.isPending}
+                      >
+                        {rejectMutation.isPending ? "Denying…" : "Deny request"}
+                      </Button>
+                      <Button
                         size="sm"
                         onClick={() => approveMutation.mutate()}
-                        disabled={approveMutation.isPending}
+                        disabled={!canWrite || approveMutation.isPending}
                       >
                         {approveMutation.isPending ? "Approving…" : "Approve and create license"}
                       </Button>

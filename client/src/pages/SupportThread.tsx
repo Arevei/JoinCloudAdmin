@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useCanWrite } from "@/auth/usePermission";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
 import { 
@@ -17,6 +18,7 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { SupportMessage } from "@shared/schema";
 
 export default function SupportThread() {
+  const canWrite = useCanWrite();
   const params = useParams<{ deviceUUID: string }>();
   const deviceUUID = params.deviceUUID;
   const [messageText, setMessageText] = useState("");
@@ -107,7 +109,7 @@ export default function SupportThread() {
             size="sm"
             className="shrink-0 border-green-500/30 text-green-400 hover:bg-green-500/10"
             onClick={() => resolveThread.mutate()}
-            disabled={resolveThread.isPending}
+            disabled={!canWrite || resolveThread.isPending}
             data-testid="button-resolve-thread"
           >
             <CheckCircle className="w-4 h-4 mr-1.5" />
@@ -193,7 +195,7 @@ export default function SupportThread() {
             />
             <Button
               onClick={handleSend}
-              disabled={!messageText.trim() || sendMessage.isPending}
+              disabled={!canWrite || !messageText.trim() || sendMessage.isPending}
               className="self-end"
               data-testid="button-send-message"
             >

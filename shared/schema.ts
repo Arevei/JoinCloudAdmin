@@ -147,6 +147,7 @@ export const accounts = pgTable("accounts", {
   referralDaysEarned: integer("referral_days_earned").default(0),
   deviceChangeCount: integer("device_change_count").default(0),
   lastDeviceChangeAt: text("last_device_change_at"),
+  adminRole: text("admin_role"),  // "super_admin" | "admin" | "user" | null (null = regular customer, no panel access)
 }, (table) => ({
   referralCodeIdx: index("idx_accounts_referral_code").on(table.referralCode),
 }));
@@ -298,6 +299,9 @@ export const subscriptionRequests = pgTable("subscription_requests", {
   deviceId: text("device_id"),
   customUsers: integer("custom_users"),
   customDevices: integer("custom_devices"),
+  requestedDays: integer("requested_days"),
+  requestedShareLimit: integer("requested_share_limit"),
+  requestedDeviceLimit: integer("requested_device_limit"),
   notes: text("notes"),
   licenseId: text("license_id").references(() => licenses.id),
   approvedBy: text("approved_by"),

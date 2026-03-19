@@ -99,6 +99,7 @@ export interface Account {
   referralDaysEarned?: number;
   deviceChangeCount?: number;
   lastDeviceChangeAt?: string | null;
+  adminRole?: string | null;
 }
 
 export interface License {
@@ -314,7 +315,7 @@ export interface IStorage {
   getSupportThreadPreviews(): Promise<SupportThreadPreview[]>;
   registerHost(payload: HostRegisterPayload): Promise<Host>;
   hostHeartbeat(payload: HostHeartbeatPayload): Promise<void>;
-  getHosts(filters?: { platform?: string; version?: string; sortBy?: string; sortOrder?: string; page?: number; limit?: number }): Promise<{ hosts: Host[]; total: number }>;
+  getHosts(filters?: { platform?: string; version?: string; search?: string; sortBy?: string; sortOrder?: string; page?: number; limit?: number }): Promise<{ hosts: Host[]; total: number }>;
   getHostByUUID(hostUUID: string): Promise<Host | null>;
   createAccount(id: string, email: string, passwordHash: string): Promise<Account>;
   getAccountByEmail(email: string): Promise<Account | null>;
@@ -348,6 +349,8 @@ export interface IStorage {
   reportUsageAggregates(hostUuid: string, aggregates: Array<{ period_start: string; period_end: string; uptime_seconds: number; storage_used_bytes: number; bytes_uploaded: number; bytes_downloaded: number; total_shares: number; total_devices: number }>): Promise<void>;
   getUsageAggregates(filters?: { hostUuid?: string; limit?: number }): Promise<UsageAggregate[]>;
   listAccounts(): Promise<Account[]>;
+  updateAccountAdminRole(accountId: string, role: string | null): Promise<void>;
+  listAdminPanelAccounts(): Promise<Account[]>;
   updateAccountSubscription(accountId: string, updates: { stripeCustomerId?: string; subscriptionId?: string; subscriptionStatus?: string; renewalAt?: string | null; graceEndsAt?: string | null }): Promise<void>;
   listLicensesWithHostCounts(): Promise<Array<License & { hostCount: number }>>;
   revokeLicense(licenseId: string): Promise<void>;
@@ -399,6 +402,9 @@ export interface IStorage {
     deviceId?: string | null;
     customUsers?: number | null;
     customDevices?: number | null;
+    requestedDays?: number | null;
+    requestedShareLimit?: number | null;
+    requestedDeviceLimit?: number | null;
     notes?: string | null;
     licenseId?: string | null;
     approvedBy?: string | null;
@@ -474,6 +480,7 @@ function mapAccountRow(row: typeof accounts.$inferSelect): Account {
     referralDaysEarned: Number(row.referralDaysEarned ?? 0),
     deviceChangeCount: Number(row.deviceChangeCount ?? 0),
     lastDeviceChangeAt: row.lastDeviceChangeAt ?? null,
+    adminRole: row.adminRole ?? null,
   };
 }
 
@@ -1454,11 +1461,15 @@ export class DrizzleStorage implements IStorage {
     }
   }
 
-  async getHosts(filters?: { platform?: string; version?: string; sortBy?: string; sortOrder?: string; page?: number; limit?: number }): Promise<{ hosts: Host[]; total: number }> {
+  async getHosts(filters?: { platform?: string; version?: string; search?: string; sortBy?: string; sortOrder?: string; page?: number; limit?: number }): Promise<{ hosts: Host[]; total: number }> {
     const conditions = [];
 
     if (filters?.platform) conditions.push(eq(hosts.platform, filters.platform));
     if (filters?.version) conditions.push(eq(hosts.version, filters.version));
+    if (filters?.search && String(filters.search).trim()) {
+      const q = String(filters.search).trim().toLowerCase();
+      conditions.push(sql`LOWER(${hosts.hostUuid}) LIKE ${'%' + q + '%'}`);
+    }
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
@@ -1584,6 +1595,16 @@ export class DrizzleStorage implements IStorage {
 
   async listAccounts(): Promise<Account[]> {
     const rows = await db.select().from(accounts).orderBy(desc(accounts.createdAt));
+    return rows.map(mapAccountRow);
+  }
+
+  async updateAccountAdminRole(accountId: string, role: string | null): Promise<void> {
+    const now = new Date().toISOString();
+    await db.update(accounts).set({ adminRole: role, updatedAt: now }).where(eq(accounts.id, accountId));
+  }
+
+  async listAdminPanelAccounts(): Promise<Account[]> {
+    const rows = await db.select().from(accounts).where(sql`${accounts.adminRole} IS NOT NULL`).orderBy(desc(accounts.createdAt));
     return rows.map(mapAccountRow);
   }
 
@@ -2629,6 +2650,9 @@ export class DrizzleStorage implements IStorage {
     deviceId?: string | null;
     customUsers?: number | null;
     customDevices?: number | null;
+    requestedDays?: number | null;
+    requestedShareLimit?: number | null;
+    requestedDeviceLimit?: number | null;
     notes?: string | null;
     licenseId?: string | null;
     approvedBy?: string | null;
@@ -2645,6 +2669,9 @@ export class DrizzleStorage implements IStorage {
       deviceId: request.deviceId ?? null,
       customUsers: request.customUsers ?? null,
       customDevices: request.customDevices ?? null,
+      requestedDays: request.requestedDays ?? null,
+      requestedShareLimit: request.requestedShareLimit ?? null,
+      requestedDeviceLimit: request.requestedDeviceLimit ?? null,
       notes: request.notes ?? null,
       licenseId: request.licenseId ?? null,
       approvedBy: request.approvedBy ?? null,

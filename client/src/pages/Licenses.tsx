@@ -1,4 +1,5 @@
 import { useState, Fragment } from "react";
+import { useCanWrite } from "@/auth/usePermission";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Key, Ban, CalendarPlus, ChevronDown, ChevronRight, UserMinus, UserPlus, Settings, Share2, HardDrive, Users, Clock, ShieldAlert, ShieldCheck, FileText, Plus, UserCheck } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -71,6 +72,7 @@ interface License {
 }
 
 export default function Licenses() {
+  const canWrite = useCanWrite();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [revokeId, setRevokeId] = useState<string | null>(null);
@@ -79,12 +81,12 @@ export default function Licenses() {
   const [extendDays, setExtendDays] = useState(30);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [grantDeviceId, setGrantDeviceId] = useState("");
-  const [grantTier, setGrantTier] = useState<"pro" | "teams" | "custom">("pro");
+  const [grantTier, setGrantTier] = useState<"pro" | "custom">("pro");
   const [customUsersOrStorage, setCustomUsersOrStorage] = useState(5);
   const [customPairingDevices, setCustomPairingDevices] = useState(5);
   const [replaceModal, setReplaceModal] = useState<{
     deviceId: string;
-    tier: "pro" | "teams" | "custom";
+    tier: "pro" | "custom";
     licenseId: string;
     existingTier: string;
     expiresAt: number;
@@ -94,7 +96,7 @@ export default function Licenses() {
 
   const [modifyLicense, setModifyLicense] = useState<License | null>(null);
   const [modifyForm, setModifyForm] = useState({
-    tier: "pro" as "trial" | "pro" | "teams" | "custom" | "free",
+    tier: "pro" as "trial" | "pro" | "custom" | "free",
     state: "active" as "active" | "revoked",
     deviceLimit: 5,
     shareLimit: 200,
@@ -114,6 +116,12 @@ export default function Licenses() {
     pendingUpdates: Parameters<typeof modifyMutation.mutate>[0];
   } | null>(null);
 
+  const [search, setSearch] = useState("");
+  const [tierFilter, setTierFilter] = useState<string>("all");
+  const [stateFilter, setStateFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
+
   const { data: licenses, isLoading, error } = useQuery<License[]>({
     queryKey: ["/api/admin/licenses"],
     queryFn: async () => {
@@ -124,7 +132,25 @@ export default function Licenses() {
     refetchInterval: 30000,
   });
 
-  const expandedLicense = licenses?.find((l) => l.id === expandedId);
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredLicenses = (licenses ?? []).filter((l) => {
+    const tierOk = tierFilter === "all" ? true : String(l.tier || "").toLowerCase() === tierFilter;
+    const stateOk = stateFilter === "all" ? true : String(l.state || "").toLowerCase() === stateFilter;
+    if (!tierOk || !stateOk) return false;
+    if (!normalizedSearch) return true;
+    const email = l.accountEmail || "";
+    const deviceId = l.firstDeviceId || "";
+    return (
+      l.id.toLowerCase().includes(normalizedSearch) ||
+      email.toLowerCase().includes(normalizedSearch) ||
+      deviceId.toLowerCase().includes(normalizedSearch)
+    );
+  });
+  const totalPages = Math.max(1, Math.ceil(filteredLicenses.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pagedLicenses = filteredLicenses.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  const expandedLicense = pagedLicenses.find((l) => l.id === expandedId);
   const { data: licenseHosts, isLoading: hostsLoading } = useQuery<{ hosts: Array<{ host_uuid: string; activated_at: string; last_seen_at: string | null; isOnline: boolean }> }>({
     queryKey: ["/api/admin/licenses", expandedId, "hosts"],
     queryFn: async () => {
@@ -143,7 +169,7 @@ export default function Licenses() {
       if (!res.ok) throw new Error("Failed to fetch members");
       return res.json();
     },
-    enabled: !!expandedId && expandedLicense?.tier === "teams",
+    enabled: false,
   });
   const [addMemberEmail, setAddMemberEmail] = useState("");
 
@@ -213,7 +239,7 @@ export default function Licenses() {
   });
 
   const grantMutation = useMutation({
-    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "custom" }) => {
       const res = await fetch("/api/admin/licenses/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -236,7 +262,7 @@ export default function Licenses() {
   });
 
   const grantReplaceMutation = useMutation({
-    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "teams" | "custom" }) => {
+    mutationFn: async ({ deviceId, tier }: { deviceId: string; tier: "pro" | "custom" }) => {
       const res = await fetch("/api/admin/licenses/grant-replace", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -407,7 +433,7 @@ export default function Licenses() {
     const normalizedState: "active" | "revoked" =
       license.state === "revoked" ? "revoked" : "active";
     setModifyForm({
-      tier: tierKey as "trial" | "pro" | "teams" | "custom" | "free",
+      tier: tierKey as "trial" | "pro" | "custom" | "free",
       state: normalizedState,
       deviceLimit: license.deviceLimit,
       shareLimit: overrides.shareLimitMonthly ?? license.customQuota ?? (license.tier === "PRO" || license.tier === "pro" ? 200 : license.tier === "TEAMS" || license.tier === "teams" ? 1000 : 10),
@@ -589,89 +615,51 @@ export default function Licenses() {
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
-      <div className="mb-6">
+      <div className="mb-6 flex flex-col gap-3">
         <h1 className="text-2xl font-display font-bold text-white mb-1">Licenses</h1>
         <p className="text-muted-foreground text-sm">
           Grant Pro or Teams access to a device • {licenses?.length ?? 0} total
         </p>
-      </div>
-
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <UserPlus className="w-5 h-5" />
-            Grant license
-          </CardTitle>
-          <CardDescription>Grant Pro, Teams, or Custom plan by device ID. If the device already has a license, you can replace the current plan.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-wrap items-end gap-4">
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-sm text-muted-foreground block mb-1">Device ID</label>
-            <input
-              type="text"
-              value={grantDeviceId}
-              onChange={(e) => setGrantDeviceId(e.target.value)}
-              placeholder="paste device UUID"
-              className="w-full rounded border bg-background px-3 py-2 text-sm"
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+          <div className="flex-1 max-w-xl">
+            <Input
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search by license ID, owner email, or device ID…"
+              className="bg-white/5 border-white/10"
+              data-testid="input-licenses-search"
             />
           </div>
-          <div className="w-[160px]">
-            <label className="text-sm text-muted-foreground block mb-1">Plan</label>
-            <select
-              value={grantTier}
-              onChange={(e) => setGrantTier(e.target.value as "pro" | "teams" | "custom")}
-              className="w-full rounded border bg-background px-3 py-2 text-sm"
-            >
-              <option value="pro">Pro (1 user, 5 devices)</option>
-              <option value="teams">Teams (5 users, 5 devices)</option>
-              <option value="custom">Custom</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-2 justify-end">
+            <Select value={tierFilter} onValueChange={(v) => { setTierFilter(v); setPage(1); }}>
+              <SelectTrigger className="w-[160px] bg-white/5 border-white/10" data-testid="select-license-tier-filter">
+                <SelectValue placeholder="Tier" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All tiers</SelectItem>
+                <SelectItem value="free">Free</SelectItem>
+                <SelectItem value="trial">Trial</SelectItem>
+                <SelectItem value="pro">Pro</SelectItem>
+                <SelectItem value="teams">Teams</SelectItem>
+                <SelectItem value="custom">Custom</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={stateFilter} onValueChange={(v) => { setStateFilter(v); setPage(1); }}>
+              <SelectTrigger className="w-[160px] bg-white/5 border-white/10" data-testid="select-license-state-filter">
+                <SelectValue placeholder="State" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All states</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="revoked">Revoked</SelectItem>
+                <SelectItem value="expired">Expired</SelectItem>
+                <SelectItem value="grace">Grace</SelectItem>
+                <SelectItem value="trial_active">Trial</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-          {grantTier === "custom" && (
-            <>
-              <div className="w-[100px]">
-                <label className="text-sm text-muted-foreground block mb-1">Users/Storage</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={1000}
-                  value={customUsersOrStorage}
-                  onChange={(e) => setCustomUsersOrStorage(parseInt(e.target.value, 10) || 1)}
-                  className="w-full rounded border bg-background px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="w-[100px]">
-                <label className="text-sm text-muted-foreground block mb-1">Pairing devices</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={customPairingDevices}
-                  onChange={(e) => setCustomPairingDevices(parseInt(e.target.value, 10) || 1)}
-                  className="w-full rounded border bg-background px-3 py-2 text-sm"
-                />
-              </div>
-            </>
-          )}
-          <Button
-            onClick={() => {
-              const deviceId = grantDeviceId.trim();
-              if (!deviceId) return;
-              if (grantTier === "custom") {
-                grantCustomMutation.mutate({ deviceId, usersOrStorage: customUsersOrStorage, pairingDevices: customPairingDevices });
-              } else {
-                grantMutation.mutate({ deviceId, tier: grantTier });
-              }
-            }}
-            disabled={
-              (grantTier === "custom" ? grantCustomMutation.isPending : grantMutation.isPending) ||
-              !grantDeviceId.trim()
-            }
-          >
-            {grantTier === "custom" ? (grantCustomMutation.isPending ? "Granting…" : "Grant custom") : grantMutation.isPending ? "Granting…" : "Grant license"}
-          </Button>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {isLoading ? (
         <Card>
@@ -705,7 +693,7 @@ export default function Licenses() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(licenses ?? []).map((l) => (
+                {pagedLicenses.map((l) => (
                   <Fragment key={l.id}>
                     <TableRow>
                       <TableCell className="w-8 p-1">
@@ -755,54 +743,68 @@ export default function Licenses() {
                         ) : null}
                         {!l.renewalAt && !l.graceEndsAt ? "—" : null}
                       </TableCell>
-                      <TableCell className="text-right space-x-2">
+                      <TableCell className="text-right space-x-1">
                         <Button
-                          variant="default"
-                          size="sm"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
                           onClick={() => openModifyDialog(l)}
+                          disabled={!canWrite}
+                          aria-label="Modify license"
+                          title="Modify license"
                         >
-                          <Settings className="w-3 h-3 mr-1" />
-                          Modify
+                          <Settings className="w-4 h-4" />
                         </Button>
                         {l.state !== "revoked" && (
                           <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive"
                             onClick={() => setRevokeId(l.id)}
+                            disabled={!canWrite}
+                            aria-label="Revoke license"
+                            title="Revoke license"
                           >
-                            <Ban className="w-3 h-3 mr-1" />
-                            Revoke
+                            <Ban className="w-4 h-4" />
                           </Button>
                         )}
                         {l.state === "revoked" && (
                           <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-emerald-400"
                             onClick={() => unrevokeMutation.mutate(l.id)}
-                            disabled={unrevokeMutation.isPending}
+                            disabled={!canWrite || unrevokeMutation.isPending}
+                            aria-label="Restore license"
+                            title={unrevokeMutation.isPending ? "Restoring…" : "Restore license"}
                           >
-                            <ShieldCheck className="w-3 h-3 mr-1" />
-                            {unrevokeMutation.isPending ? "Restoring..." : "Unrevoke"}
+                            <ShieldCheck className="w-4 h-4" />
                           </Button>
                         )}
                         {(l.state === "active" || l.state === "trial_active" || l.state === "grace") && (
                           <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
                             onClick={() => setExtendId(l.id)}
+                            disabled={!canWrite}
+                            aria-label="Extend expiry"
+                            title="Extend expiry"
                           >
-                            <CalendarPlus className="w-3 h-3 mr-1" />
-                            Extend
+                            <CalendarPlus className="w-4 h-4" />
                           </Button>
                         )}
                         {l.state !== "revoked" && l.state !== "expired" && (
                           <Button
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-amber-400"
                             onClick={() => setEndTrialId(l.id)}
+                            disabled={!canWrite}
+                            aria-label="End plan now"
+                            title="End plan now"
                           >
-                            <Clock className="w-3 h-3 mr-1" />
-                            End Plan Now
+                            <Clock className="w-4 h-4" />
                           </Button>
                         )}
                       </TableCell>
@@ -908,8 +910,36 @@ export default function Licenses() {
                 ))}
               </TableBody>
             </Table>
-            {(!licenses || licenses.length === 0) && (
-              <p className="text-center text-muted-foreground py-8">No licenses yet.</p>
+            {(filteredLicenses.length === 0) && (
+              <p className="text-center text-muted-foreground py-8">No licenses match your filters.</p>
+            )}
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between mt-4">
+                <p className="text-xs text-muted-foreground" data-testid="text-licenses-pagination">
+                  Page {currentPage} of {totalPages} ({filteredLicenses.length} licenses)
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage <= 1}
+                    data-testid="button-licenses-prev-page"
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={currentPage >= totalPages}
+                    data-testid="button-licenses-next-page"
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -1127,7 +1157,6 @@ export default function Licenses() {
                     )}
                     <SelectItem value="free">Free</SelectItem>
                     <SelectItem value="pro">Pro</SelectItem>
-                    <SelectItem value="teams">Teams</SelectItem>
                     <SelectItem value="custom">Custom</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1251,7 +1280,7 @@ export default function Licenses() {
               </div>
 
               {/* Team Limit */}
-              {(modifyForm.tier === "teams" || modifyForm.tier === "custom") && (
+              {(modifyForm.tier === "custom") && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label className="flex items-center gap-2">
@@ -1347,7 +1376,7 @@ export default function Licenses() {
             </Button>
             <Button 
               onClick={handleModifySave}
-              disabled={modifyMutation.isPending}
+              disabled={!canWrite || modifyMutation.isPending}
             >
               {modifyMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>

@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useCanWrite } from "@/auth/usePermission";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   CreditCard, 
@@ -97,6 +98,7 @@ interface AccountWithBilling {
 }
 
 export default function Accounts() {
+  const canWrite = useCanWrite();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
@@ -807,7 +809,7 @@ export default function Accounts() {
                   });
                 }
               }}
-              disabled={!inviteEmail || inviteMutation.isPending}
+              disabled={!canWrite || !inviteEmail || inviteMutation.isPending}
             >
               <Plus className="w-4 h-4 mr-2" />
               {inviteMutation.isPending ? "Sending..." : "Send Invitation"}
@@ -920,7 +922,7 @@ export default function Accounts() {
                   });
                 }
               }}
-              disabled={updateBillingMutation.isPending}
+              disabled={!canWrite || updateBillingMutation.isPending}
             >
               {updateBillingMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>

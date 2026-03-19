@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -45,6 +46,7 @@ export default function Hosts() {
   const [sortOrder, setSortOrder] = useState<'DESC' | 'ASC'>('DESC');
   const [platformFilter, setPlatformFilter] = useState<string>('all');
   const [versionFilter, setVersionFilter] = useState<string>('all');
+  const [search, setSearch] = useState<string>('');
   const limit = 20;
 
   const queryParams = new URLSearchParams({
@@ -55,9 +57,10 @@ export default function Hosts() {
   });
   if (platformFilter && platformFilter !== 'all') queryParams.set('platform', platformFilter);
   if (versionFilter && versionFilter !== 'all') queryParams.set('version', versionFilter);
+  if (search.trim()) queryParams.set('search', search.trim());
 
   const { data, isLoading, error } = useQuery<HostsResponse>({
-    queryKey: ['/api/admin/hosts', page, sortBy, sortOrder, platformFilter, versionFilter],
+    queryKey: ['/api/admin/hosts', page, sortBy, sortOrder, platformFilter, versionFilter, search],
     queryFn: async () => {
       const res = await fetch(`/api/admin/hosts?${queryParams.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch hosts');
@@ -154,33 +157,56 @@ export default function Hosts() {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 mb-4">
-        <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-muted-foreground" />
-          <span className="text-sm text-muted-foreground">Filters:</span>
+      <div className="flex flex-col gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-3 justify-between">
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">Filters:</span>
+          </div>
+          <div className="w-full sm:w-auto sm:min-w-[280px]">
+            <Input
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search host UUID…"
+              className="bg-white/5 border-white/10"
+              data-testid="input-host-search"
+            />
+          </div>
         </div>
-        <Select value={platformFilter} onValueChange={(v) => { setPlatformFilter(v); setPage(1); }}>
-          <SelectTrigger className="w-[140px] bg-white/5 border-white/10" data-testid="select-platform-filter">
-            <SelectValue placeholder="Platform" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Platforms</SelectItem>
-            {filtersData?.platforms.map(p => (
-              <SelectItem key={p} value={p}>{p}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={versionFilter} onValueChange={(v) => { setVersionFilter(v); setPage(1); }}>
-          <SelectTrigger className="w-[140px] bg-white/5 border-white/10" data-testid="select-version-filter">
-            <SelectValue placeholder="Version" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Versions</SelectItem>
-            {filtersData?.versions.map(v => (
-              <SelectItem key={v} value={v}>v{v}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex flex-wrap items-center gap-3">
+          <Select value={platformFilter} onValueChange={(v) => { setPlatformFilter(v); setPage(1); }}>
+            <SelectTrigger className="w-[160px] bg-white/5 border-white/10" data-testid="select-platform-filter">
+              <SelectValue placeholder="Platform" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Platforms</SelectItem>
+              {filtersData?.platforms.map(p => (
+                <SelectItem key={p} value={p}>{p}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={versionFilter} onValueChange={(v) => { setVersionFilter(v); setPage(1); }}>
+            <SelectTrigger className="w-[160px] bg-white/5 border-white/10" data-testid="select-version-filter">
+              <SelectValue placeholder="Version" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Versions</SelectItem>
+              {filtersData?.versions.map(v => (
+                <SelectItem key={v} value={v}>v{v}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {(search.trim() || platformFilter !== 'all' || versionFilter !== 'all') && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { setSearch(''); setPlatformFilter('all'); setVersionFilter('all'); setPage(1); }}
+              data-testid="button-clear-host-filters"
+            >
+              Clear
+            </Button>
+          )}
+        </div>
       </div>
 
       {isLoading ? (
