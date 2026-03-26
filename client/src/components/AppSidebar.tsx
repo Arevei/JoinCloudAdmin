@@ -23,6 +23,7 @@ import {
   CreditCard,
   Receipt,
   BarChart3,
+  Download,
   Settings,
   ClipboardList,
 } from "lucide-react";
@@ -73,6 +74,11 @@ const menuItems = [
     title: "Manual Requests",
     url: "/manual-requests",
     icon: ClipboardList,
+  },
+  {
+    title: "Updates",
+    url: "/updates",
+    icon: Download,
   },
   {
     title: "Usage",

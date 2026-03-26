@@ -264,6 +264,21 @@ export const appSettings = pgTable("app_settings", {
   value: text("value").notNull(),
 });
 
+// === IN-APP UPDATES (versions manifest) ===
+// Stored in DB and served as a public versions.json manifest for desktop apps.
+export const updateManifestEntries = pgTable("update_manifest_entries", {
+  id: serial("id").primaryKey(),
+  version: text("version").notNull().unique(),
+  releaseDate: text("release_date").notNull(),
+  channel: text("channel").notNull().default("stable"),
+  changelogJson: text("changelog_json").notNull().default("[]"),
+  downloadsJson: text("downloads_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => ({
+  releaseDateIdx: index("idx_update_manifest_entries_release_date").on(table.releaseDate),
+}));
+
 // === SUBSCRIPTION & BILLING TABLES ===
 
 export const subscriptions = pgTable("subscriptions", {
@@ -516,6 +531,22 @@ export type Device = z.infer<typeof deviceSchema>;
 export type HostRegisterPayload = z.infer<typeof hostRegisterPayloadSchema>;
 export type HostHeartbeatPayload = z.infer<typeof hostHeartbeatPayloadSchema>;
 export type Host = z.infer<typeof hostSchema>;
+
+export const updateManifestDownloadsSchema = z.object({
+  win: z.string().url().optional(),
+  mac: z.string().url().optional(),
+  linux: z.string().url().optional(),
+});
+
+export const updateManifestEntrySchema = z.object({
+  version: z.string().min(1),
+  releaseDate: z.string().min(1),
+  channel: z.string().min(1).default("stable"),
+  changelog: z.array(z.string()).default([]),
+  downloads: updateManifestDownloadsSchema.default({}),
+});
+
+export type UpdateManifestEntry = z.infer<typeof updateManifestEntrySchema>;
 
 // === ADDITIONAL SCHEMAS USED BY ROUTES ===
 

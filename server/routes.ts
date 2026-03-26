@@ -109,6 +109,26 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Public: versions manifest for desktop apps (no auth)
+  app.get("/versions.json", async (_req, res) => {
+    try {
+      const rows = await storage.listUpdateManifestEntries();
+      const payload = rows.map((r) => ({
+        version: r.version,
+        releaseDate: r.releaseDate,
+        channel: r.channel,
+        changelog: Array.isArray(r.changelog) ? r.changelog : [],
+        downloads: r.downloads || {},
+      }));
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Cache-Control", "public, max-age=60");
+      res.json(payload);
+    } catch (err) {
+      console.error("versions.json error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
   function setAdminSessionCookie(res: import("express").Response, accessToken: string, refreshToken?: string) {
     const isProd = process.env.NODE_ENV === "production";
     res.cookie(ADMIN_SESSION_COOKIE_NAME, accessToken, {
@@ -174,6 +194,53 @@ export async function registerRoutes(
       return requireRole("admin")(req, res, next);
     }
     next();
+  });
+
+  // === ADMIN: IN-APP UPDATE MANIFEST (super_admin only) ===
+  app.get("/api/admin/updates/manifest", requireRole("super_admin"), async (_req, res) => {
+    try {
+      const rows = await storage.listUpdateManifestEntries();
+      res.json({ versions: rows });
+    } catch (err) {
+      console.error("updates manifest list error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.post("/api/admin/updates/manifest", requireRole("super_admin"), async (req, res) => {
+    try {
+      const body = z.object({
+        version: z.string().min(1),
+        releaseDate: z.string().min(1),
+        channel: z.string().min(1).default("stable"),
+        changelog: z.array(z.string()).default([]),
+        downloads: z.object({
+          win: z.string().url().optional(),
+          mac: z.string().url().optional(),
+          linux: z.string().url().optional(),
+        }).default({}),
+      }).parse(req.body);
+      const out = await storage.upsertUpdateManifestEntry(body);
+      res.json(out);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ message: err.errors[0].message, field: err.errors[0].path.join(".") });
+        return;
+      }
+      console.error("updates manifest upsert error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.delete("/api/admin/updates/manifest/:version", requireRole("super_admin"), async (req, res) => {
+    try {
+      const version = req.params.version;
+      const ok = await storage.deleteUpdateManifestEntry(version);
+      res.json({ success: ok });
+    } catch (err) {
+      console.error("updates manifest delete error:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
   });
 
   // Google OAuth for admin panel (optional; enabled only when env vars present)
@@ -3323,10 +3390,13 @@ export async function registerRoutes(
       const now = Math.floor(Date.now() / 1000);
       if (!license || logoutRequested) {
         const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]);
+        const origin = getRequestOrigin(req);
+        const versionsUrl = `${origin}/versions.json`;
         res.json({
           license: { state: "UNREGISTERED", tier: "", device_limit: 0, expires_at: 0, features: {} },
           activation: { required: true },
           telemetry: { default_enabled: true },
+          updates: { versions_url: versionsUrl },
           trial_days: TRIAL_DAYS,
           dev_mode: IS_DEV,
           dev_trial_minutes: devTrialMins,
@@ -3398,6 +3468,8 @@ export async function registerRoutes(
         if (overrides.teamEnabled != null) entitlements.teamEnabled = overrides.teamEnabled;
       }
       const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]);
+      const origin = getRequestOrigin(req);
+      const versionsUrl = `${origin}/versions.json`;
       res.json({
         license: {
           state,
@@ -3410,6 +3482,7 @@ export async function registerRoutes(
         },
         activation: { required: false },
         telemetry: { default_enabled: true },
+        updates: { versions_url: versionsUrl },
         trial_days: TRIAL_DAYS,
         dev_mode: IS_DEV,
         dev_trial_minutes: devTrialMins,
@@ -3443,10 +3516,13 @@ export async function registerRoutes(
     } catch (err) {
       console.error("Config error:", err);
       const [devTrialMins, devWarningMins] = await Promise.all([getDevTrialMinutes(), getDevExpiryWarningMinutes()]).catch(() => [DEV_TRIAL_MINUTES_DEFAULT, DEV_EXPIRY_WARNING_MINUTES_DEFAULT]);
+      const origin = getRequestOrigin(req);
+      const versionsUrl = `${origin}/versions.json`;
       res.status(500).json({
         license: { state: "UNREGISTERED", tier: "", device_limit: 0, expires_at: 0, features: {} },
         activation: { required: true },
         telemetry: { default_enabled: true },
+        updates: { versions_url: versionsUrl },
         trial_days: TRIAL_DAYS,
         dev_mode: IS_DEV,
         dev_trial_minutes: devTrialMins,

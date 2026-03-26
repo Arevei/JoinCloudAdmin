@@ -18,6 +18,7 @@ import {
   teamInvitations,
   usageAggregates,
   appSettings,
+  updateManifestEntries,
   subscriptions,
   subscriptionRequests,
   payments,
@@ -34,6 +35,7 @@ import {
   type HostRegisterPayload,
   type HostHeartbeatPayload,
   type Host,
+  type UpdateManifestEntry,
 } from "@shared/schema";
 
 // === INTERFACES & TYPES ===
@@ -2087,6 +2089,76 @@ export class DrizzleStorage implements IStorage {
       .insert(appSettings)
       .values({ key, value })
       .onConflictDoUpdate({ target: appSettings.key, set: { value } });
+  }
+
+  // === IN-APP UPDATES (manifest) ===
+
+  async listUpdateManifestEntries(): Promise<Array<{ id: number; version: string; releaseDate: string; channel: string; changelog: string[]; downloads: { win?: string; mac?: string; linux?: string } }>> {
+    const rows = await db.select().from(updateManifestEntries).orderBy(desc(updateManifestEntries.releaseDate));
+    return rows.map((r) => {
+      let changelog: string[] = [];
+      let downloads: { win?: string; mac?: string; linux?: string } = {};
+      try {
+        const parsed = JSON.parse(r.changelogJson || "[]");
+        if (Array.isArray(parsed)) changelog = parsed.filter((x) => typeof x === "string");
+      } catch (_) {}
+      try {
+        const parsed = JSON.parse(r.downloadsJson || "{}");
+        if (parsed && typeof parsed === "object") downloads = parsed;
+      } catch (_) {}
+      return {
+        id: r.id,
+        version: r.version,
+        releaseDate: r.releaseDate,
+        channel: r.channel,
+        changelog,
+        downloads,
+      };
+    });
+  }
+
+  async upsertUpdateManifestEntry(entry: UpdateManifestEntry): Promise<{ id: number; version: string }> {
+    const now = new Date().toISOString();
+    const version = String(entry.version || "").trim();
+    const releaseDate = String(entry.releaseDate || "").trim();
+    const channel = String(entry.channel || "stable").trim() || "stable";
+    const changelogJson = JSON.stringify(Array.isArray(entry.changelog) ? entry.changelog : []);
+    const downloadsJson = JSON.stringify(entry.downloads || {});
+
+    const inserted = await db
+      .insert(updateManifestEntries)
+      .values({
+        version,
+        releaseDate,
+        channel,
+        changelogJson,
+        downloadsJson,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: updateManifestEntries.version,
+        set: {
+          releaseDate,
+          channel,
+          changelogJson,
+          downloadsJson,
+          updatedAt: now,
+        },
+      })
+      .returning({ id: updateManifestEntries.id, version: updateManifestEntries.version });
+
+    return { id: inserted[0]!.id, version: inserted[0]!.version };
+  }
+
+  async deleteUpdateManifestEntry(version: string): Promise<boolean> {
+    const v = String(version || "").trim();
+    if (!v) return false;
+    const deleted = await db
+      .delete(updateManifestEntries)
+      .where(eq(updateManifestEntries.version, v))
+      .returning({ id: updateManifestEntries.id });
+    return deleted.length > 0;
   }
 
   // === USAGE AGGREGATES ===
