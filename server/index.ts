@@ -5,9 +5,13 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startSubscriptionCron } from "./subscription-cron";
 import { startLicenseExpiryCron } from "./license-expiry-cron";
+import { startSocketServer } from "./socket";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Start the standalone Socket.IO server (separate port, not injected into admin HTTP server)
+startSocketServer();
 
 declare module "http" {
   interface IncomingMessage {

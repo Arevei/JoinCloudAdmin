@@ -14,7 +14,6 @@ import {
   authRegisterSchema,
   authLoginSchema,
   licenseActivateSchema,
-  usageReportSchema,
   signedLicensePayloadSchema,
 } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -37,6 +36,7 @@ import { handleStripeWebhook } from "./stripe-webhook";
 import { verifyRazorpaySignature, handleRazorpayWebhook } from "./razorpay-webhook";
 import { getTimeUnitSeconds, getLicenseTimeMode } from "./license-time";
 import { emitLicenseUpdated } from "./license-events";
+import { emitToDevice, emitToAdmins } from "./socket";
 
 const ADMIN_VERSION = "1.0.0";
 
@@ -620,10 +620,16 @@ export async function registerRoutes(
     try {
       const payload = newMessagePayloadSchema.parse(req.body);
       const message = await storage.addMessage(
-        req.params.deviceUUID, 
-        payload.sender, 
+        req.params.deviceUUID,
+        payload.sender,
         payload.text
       );
+      // Push to device in real-time if sender is admin
+      if (payload.sender === "admin") {
+        emitToDevice(req.params.deviceUUID, "support:message", { message });
+      }
+      // Notify admin panel sockets so other tabs refresh instantly
+      emitToAdmins("support:message", { hostUuid: req.params.deviceUUID, message });
       res.status(201).json(message);
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -1615,6 +1621,15 @@ export async function registerRoutes(
             try { await storage.addLicenseHost(existingLicense.id, body.deviceId); } catch (_) { /* already linked */ }
           }
         }
+        // Push plan change to device in real-time
+        emitLicenseUpdated({
+          id: existingLicense.id,
+          accountId: existingLicense.accountId,
+          state: "active",
+          tier,
+          expiresAt: payload.expires_at,
+          deviceLimit,
+        });
         res.json({ success: true, tier, licenseState: "ACTIVE" });
         return;
       }
@@ -1823,24 +1838,6 @@ export async function registerRoutes(
     }
   });
 
-  // === PHASE 2: USAGE REPORT ===
-  app.post("/api/v1/usage/report", async (req, res) => {
-    try {
-      const { host_uuid, aggregates } = usageReportSchema.parse(req.body);
-      await storage.reportUsageAggregates(host_uuid, aggregates);
-      res.json({ success: true });
-    } catch (err) {
-      if (err instanceof z.ZodError) {
-        res.status(400).json({
-          message: err.errors[0].message,
-          field: err.errors[0].path.join("."),
-        });
-        return;
-      }
-      console.error("Usage report error:", err);
-      res.status(500).json({ message: "Internal Server Error" });
-    }
-  });
 
   // Manual plan/limit requests coming from JoinCloud web
   app.post("/api/v1/admin/manual-plan-request", async (req, res) => {
@@ -1956,17 +1953,6 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/admin/usage-aggregates", async (req, res) => {
-    try {
-      const hostUuid = req.query.host_uuid as string | undefined;
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : undefined;
-      const aggregates = await storage.getUsageAggregates({ hostUuid, limit });
-      res.json(aggregates);
-    } catch (err) {
-      console.error("Usage aggregates error:", err);
-      res.status(500).json({ message: "Internal Server Error" });
-    }
-  });
 
   // Admin settings (payment_mode: LIVE | DEV, subscription_mode: manual | automatic, dev_trial_minutes, dev_expiry_warning_minutes)
   app.get("/api/v1/admin/settings", requireAdminAuth, async (req, res) => {
@@ -3491,6 +3477,7 @@ export async function registerRoutes(
         account_id: license.accountId,
         account_email: accountEmail,
         display_name: displayName ?? "Join",
+        socket_port: parseInt(process.env.SOCKET_PORT || "3001", 10),
         entitlements,
         usage: {
           sharesThisMonth: await (async () => {
@@ -3527,6 +3514,7 @@ export async function registerRoutes(
         dev_mode: IS_DEV,
         dev_trial_minutes: devTrialMins,
         dev_expiry_warning_minutes: devWarningMins,
+        socket_port: parseInt(process.env.SOCKET_PORT || "3001", 10),
         usage: {
           sharesThisMonth: 0,
           devicesLinked: 0,

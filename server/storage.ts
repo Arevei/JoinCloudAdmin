@@ -16,7 +16,6 @@ import {
   licenseHosts,
   licenseMembers,
   teamInvitations,
-  usageAggregates,
   appSettings,
   updateManifestEntries,
   subscriptions,
@@ -283,19 +282,6 @@ export interface LicenseHost {
   activatedAt: string;
 }
 
-export interface UsageAggregate {
-  id: number;
-  hostUuid: string;
-  periodStart: string;
-  periodEnd: string;
-  uptimeSeconds: number;
-  storageUsedBytes: number;
-  bytesUploaded: number;
-  bytesDownloaded: number;
-  totalShares: number;
-  totalDevices: number;
-  createdAt: string;
-}
 
 export interface IStorage {
   ingestTelemetry(payload: TelemetryPayload): Promise<void>;
@@ -348,8 +334,6 @@ export interface IStorage {
   addLicenseMember(licenseId: string, accountId: string): Promise<void>;
   removeLicenseMember(licenseId: string, accountId: string): Promise<void>;
   getTeamsLicenseUserCount(licenseId: string): Promise<number>;
-  reportUsageAggregates(hostUuid: string, aggregates: Array<{ period_start: string; period_end: string; uptime_seconds: number; storage_used_bytes: number; bytes_uploaded: number; bytes_downloaded: number; total_shares: number; total_devices: number }>): Promise<void>;
-  getUsageAggregates(filters?: { hostUuid?: string; limit?: number }): Promise<UsageAggregate[]>;
   listAccounts(): Promise<Account[]>;
   updateAccountAdminRole(accountId: string, role: string | null): Promise<void>;
   listAdminPanelAccounts(): Promise<Account[]>;
@@ -1184,16 +1168,8 @@ export class DrizzleStorage implements IStorage {
       db.select({ count: sql<number>`COUNT(*)` }).from(users),
       db.select({ count: sql<number>`COUNT(*)` }).from(users).where(gte(users.lastSeen, sevenDaysAgo.toISOString())),
       db.select({
-        avgDailyUptime: sql<number>`AVG(daily_avg_uptime)`,
-      }).from(
-        db.select({
-          date: dailyMetrics.date,
-          daily_avg_uptime: sql<number>`AVG(${dailyMetrics.uptimeSeconds})`.as('daily_avg_uptime'),
-        })
-        .from(dailyMetrics)
-        .groupBy(dailyMetrics.date)
-        .as('daily')
-      ),
+        totalUptime: sql<number>`COALESCE(SUM(${dailyMetrics.uptimeSeconds}), 0)`,
+      }).from(dailyMetrics),
       db.select({
         totalProcessed: sql<number>`SUM(${dailyMetrics.bytesUploaded} + ${dailyMetrics.bytesDownloaded})`,
         totalShares: sql<number>`SUM(${dailyMetrics.sharesCreated})`,
@@ -1230,7 +1206,7 @@ export class DrizzleStorage implements IStorage {
     return {
       totalUsers: Number(totalResult[0]?.count || 0),
       activeUsers7d: Number(activeResult[0]?.count || 0),
-      avgDailyUptimeSeconds: Number(uptimeResult[0]?.avgDailyUptime || 0),
+      totalUptimeSeconds: Number(uptimeResult[0]?.totalUptime || 0),
       totalDataProcessedBytes: Number(aggregateResult[0]?.totalProcessed || 0),
       totalShares: Number(aggregateResult[0]?.totalShares || 0),
       uploadBandwidthBytes: Number(aggregateResult[0]?.totalUpload || 0),
@@ -2159,69 +2135,6 @@ export class DrizzleStorage implements IStorage {
       .where(eq(updateManifestEntries.version, v))
       .returning({ id: updateManifestEntries.id });
     return deleted.length > 0;
-  }
-
-  // === USAGE AGGREGATES ===
-
-  async reportUsageAggregates(
-    hostUuid: string,
-    aggregates: Array<{ period_start: string; period_end: string; uptime_seconds: number; storage_used_bytes: number; bytes_uploaded: number; bytes_downloaded: number; total_shares: number; total_devices: number }>
-  ): Promise<void> {
-    const now = new Date().toISOString();
-    for (const a of aggregates) {
-      await db
-        .insert(usageAggregates)
-        .values({
-          hostUuid,
-          periodStart: a.period_start,
-          periodEnd: a.period_end,
-          uptimeSeconds: a.uptime_seconds ?? 0,
-          storageUsedBytes: a.storage_used_bytes ?? 0,
-          bytesUploaded: a.bytes_uploaded ?? 0,
-          bytesDownloaded: a.bytes_downloaded ?? 0,
-          totalShares: a.total_shares ?? 0,
-          totalDevices: a.total_devices ?? 0,
-          createdAt: now,
-        })
-        .onConflictDoUpdate({
-          target: [usageAggregates.hostUuid, usageAggregates.periodStart],
-          set: {
-            periodEnd: a.period_end,
-            uptimeSeconds: a.uptime_seconds ?? 0,
-            storageUsedBytes: a.storage_used_bytes ?? 0,
-            bytesUploaded: a.bytes_uploaded ?? 0,
-            bytesDownloaded: a.bytes_downloaded ?? 0,
-            totalShares: a.total_shares ?? 0,
-            totalDevices: a.total_devices ?? 0,
-          },
-        });
-    }
-  }
-
-  async getUsageAggregates(filters?: { hostUuid?: string; limit?: number }): Promise<UsageAggregate[]> {
-    const limit = Math.min(500, Math.max(1, filters?.limit ?? 100));
-    const whereClause = filters?.hostUuid ? eq(usageAggregates.hostUuid, filters.hostUuid) : undefined;
-
-    const rows = await db
-      .select()
-      .from(usageAggregates)
-      .where(whereClause)
-      .orderBy(desc(usageAggregates.periodStart))
-      .limit(limit);
-
-    return rows.map(r => ({
-      id: r.id,
-      hostUuid: r.hostUuid,
-      periodStart: r.periodStart,
-      periodEnd: r.periodEnd,
-      uptimeSeconds: r.uptimeSeconds ?? 0,
-      storageUsedBytes: r.storageUsedBytes ?? 0,
-      bytesUploaded: r.bytesUploaded ?? 0,
-      bytesDownloaded: r.bytesDownloaded ?? 0,
-      totalShares: r.totalShares ?? 0,
-      totalDevices: r.totalDevices ?? 0,
-      createdAt: r.createdAt,
-    }));
   }
 
   // === BILLING ===

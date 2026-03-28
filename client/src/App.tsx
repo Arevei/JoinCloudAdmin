@@ -17,7 +17,6 @@ import Accounts from "@/pages/Accounts";
 import Licenses from "@/pages/Licenses";
 import Subscriptions from "@/pages/Subscriptions";
 import ManualRequests from "@/pages/ManualRequests";
-import UsageAggregates from "@/pages/UsageAggregates";
 import Updates from "@/pages/Updates";
 import Settings from "@/pages/Settings";
 import Unauthorized from "@/pages/Unauthorized";
@@ -42,7 +41,6 @@ function Router() {
       <Route path="/subscriptions" component={Subscriptions} />
       <Route path="/manual-requests" component={ManualRequests} />
       <Route path="/updates" component={Updates} />
-      <Route path="/usage" component={UsageAggregates} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>

@@ -242,22 +242,6 @@ export const teamInvitations = pgTable("team_invitations", {
   uniqueLicenseEmail: uniqueIndex("uq_team_invitations").on(table.licenseId, table.email),
 }));
 
-export const usageAggregates = pgTable("usage_aggregates", {
-  id: serial("id").primaryKey(),
-  hostUuid: text("host_uuid").notNull(),
-  periodStart: text("period_start").notNull(),
-  periodEnd: text("period_end").notNull(),
-  uptimeSeconds: integer("uptime_seconds").notNull().default(0),
-  storageUsedBytes: integer("storage_used_bytes").notNull().default(0),
-  bytesUploaded: integer("bytes_uploaded").notNull().default(0),
-  bytesDownloaded: integer("bytes_downloaded").notNull().default(0),
-  totalShares: integer("total_shares").notNull().default(0),
-  totalDevices: integer("total_devices").notNull().default(0),
-  createdAt: text("created_at").notNull(),
-}, (table) => ({
-  hostIdx: index("idx_usage_aggregates_host").on(table.hostUuid),
-  uniqueHostPeriod: uniqueIndex("uq_usage_aggregates").on(table.hostUuid, table.periodStart),
-}));
 
 export const appSettings = pgTable("app_settings", {
   key: text("key").primaryKey(),
@@ -421,7 +405,7 @@ export const advancedTelemetryStatsSchema = z.object({
 export const dashboardStatsSchema = z.object({
   totalUsers: z.number(),
   activeUsers7d: z.number(),
-  avgDailyUptimeSeconds: z.number(),
+  totalUptimeSeconds: z.number(),
   totalDataProcessedBytes: z.number(),
   totalShares: z.number(),
   uploadBandwidthBytes: z.number(),
@@ -573,19 +557,6 @@ export const licenseActivateSchema = z.object({
   device_id: z.string().optional(),
 });
 
-export const usageReportSchema = z.object({
-  host_uuid: z.string(),
-  aggregates: z.array(z.object({
-    period_start: z.string(),
-    period_end: z.string(),
-    uptime_seconds: z.number().int().nonnegative(),
-    storage_used_bytes: z.number().int().nonnegative(),
-    bytes_uploaded: z.number().int().nonnegative(),
-    bytes_downloaded: z.number().int().nonnegative(),
-    total_shares: z.number().int().nonnegative(),
-    total_devices: z.number().int().nonnegative(),
-  })),
-});
 
 export const signedLicensePayloadSchema = z.object({
   license_id: z.string(),

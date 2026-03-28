@@ -47,8 +47,13 @@ export default function Dashboard() {
     return `${bytes} B`;
   };
 
-  // Format uptime seconds to hours/minutes
+  // Format total uptime seconds — days/hours for large values
   const formatUptime = (seconds: number) => {
+    if (seconds >= 86400) {
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      return `${days}d ${hours}h`;
+    }
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     if (hours > 0) return `${hours}h ${minutes}m`;
@@ -100,8 +105,8 @@ export default function Dashboard() {
             className="border-t-4 border-t-purple-500"
           />
           <StatCard
-            title="Avg Daily Uptime"
-            value={formatUptime(data?.avgDailyUptimeSeconds || 0)}
+            title="Total Uptime"
+            value={formatUptime(data?.totalUptimeSeconds || 0)}
             icon={<Clock className="w-5 h-5" />}
             isLoading={isLoading}
             className="border-t-4 border-t-cyan-500"
@@ -312,21 +317,6 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-
-        {/* OS Distribution */}
-        {data?.osDistribution && Object.keys(data.osDistribution).length > 0 && (
-          <div className="glass-card p-6 rounded-2xl border border-white/5">
-            <h3 className="text-lg font-display font-semibold text-white mb-4">Platform Distribution</h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {Object.entries(data.osDistribution).map(([os, count]) => (
-                <div key={os} className="bg-white/5 rounded-lg p-4 border border-white/5">
-                  <div className="text-2xl font-bold text-white">{count}</div>
-                  <div className="text-sm text-muted-foreground">{os}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
       </div>
       

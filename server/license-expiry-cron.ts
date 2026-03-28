@@ -93,41 +93,52 @@ export async function runLicenseExpirySweep(): Promise<LicenseExpirySweepResult>
 }
 
 /**
- * Start periodic sweep that downgrades expired licenses to Free plan (state active, no expiry).
- *
- * Runs once on startup and then every 60 seconds.
+ * Start the nightly license-expiry sweep.
+ * Runs once on startup (to catch any licenses that expired while the server was down),
+ * then schedules itself to run every night at midnight.
  */
 export function startLicenseExpiryCron(): void {
-  // eslint-disable-next-line no-console
-  console.log("[license-expiry-cron] Starting license expiry sweep (every 60s)");
+  console.log("[license-expiry-cron] Starting — will run at midnight daily");
 
+  // Run once immediately on startup
   runLicenseExpirySweep()
     .then((result) => {
       if (result.markedExpired > 0) {
-        // eslint-disable-next-line no-console
         console.log(
-          `[license-expiry-cron] initial sweep: ${result.markedExpired} licenses downgraded to free out of ${result.processed}`,
+          `[license-expiry-cron] startup sweep: ${result.markedExpired} licenses downgraded to free out of ${result.processed}`,
         );
       }
     })
     .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error("[license-expiry-cron] initial sweep error:", err);
+      console.error("[license-expiry-cron] startup sweep error:", err);
     });
 
-  setInterval(async () => {
-    try {
-      const result = await runLicenseExpirySweep();
-      if (result.markedExpired > 0) {
-        // eslint-disable-next-line no-console
-        console.log(
-          `[license-expiry-cron] sweep: ${result.markedExpired} licenses downgraded to free out of ${result.processed}`,
-        );
-      }
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[license-expiry-cron] periodic sweep error:", err);
-    }
-  }, 60 * 1000);
+  // Schedule daily at midnight
+  function scheduleNextMidnight() {
+    const now = new Date();
+    const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    const msUntilMidnight = nextMidnight.getTime() - now.getTime();
+
+    setTimeout(() => {
+      runLicenseExpirySweep()
+        .then((result) => {
+          console.log(
+            `[license-expiry-cron] midnight sweep: ${result.markedExpired} licenses downgraded to free out of ${result.processed}`,
+          );
+        })
+        .catch((err) => {
+          console.error("[license-expiry-cron] midnight sweep error:", err);
+        })
+        .finally(() => {
+          scheduleNextMidnight(); // reschedule for next midnight
+        });
+    }, msUntilMidnight);
+
+    const h = Math.floor(msUntilMidnight / 3600000);
+    const m = Math.floor((msUntilMidnight % 3600000) / 60000);
+    console.log(`[license-expiry-cron] next sweep in ${h}h ${m}m`);
+  }
+
+  scheduleNextMidnight();
 }
 

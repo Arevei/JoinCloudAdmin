@@ -22,7 +22,6 @@ import {
   Key,
   CreditCard,
   Receipt,
-  BarChart3,
   Download,
   Settings,
   ClipboardList,
@@ -81,11 +80,6 @@ const menuItems = [
     icon: Download,
   },
   {
-    title: "Usage",
-    url: "/usage",
-    icon: BarChart3,
-  },
-  {
     title: "Settings",
     url: "/settings",
     icon: Settings,
@@ -113,7 +107,7 @@ export function AppSidebar() {
       <SidebarHeader className="border-b border-white/5 p-4">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-blue-600 flex items-center justify-center shadow-lg shadow-primary/20">
-            <Activity className="w-5 h-5 text-white" />
+            <img src="/favicon.png" alt=""/>
           </div>
           <div>
             <h1 className="text-sm font-display font-bold tracking-tight text-white">

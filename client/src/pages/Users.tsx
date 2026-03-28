@@ -1,9 +1,9 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { 
-  Monitor, 
-  Smartphone, 
+import {
+  Monitor,
+  Smartphone,
   Laptop,
   Clock,
   MessageSquare,
@@ -17,7 +17,10 @@ import {
   ShieldAlert,
   Crown,
   Users as UsersIcon,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
+import { useAdminSocket } from "@/realtime/useAdminSocket";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -46,6 +49,7 @@ export default function Users() {
   const [accountFilter, setAccountFilter] = useState<string>("all");
   const [licenseFilter, setLicenseFilter] = useState<string>("all");
   const { toast } = useToast();
+  const { isDeviceOnline } = useAdminSocket();
 
   const { data: devices, isLoading, error } = useQuery<DeviceWithAccount[]>({
     queryKey: ['/api/admin/devices'],
@@ -75,8 +79,8 @@ export default function Users() {
     const withoutAccount = all.filter(d => !d.accountEmail || d.accountEmail.includes('@device.local'));
     const trialDevices = all.filter(d => d.tier?.toLowerCase() === 'trial');
     const paidDevices = all.filter(d => d.tier && ['pro', 'teams'].includes(d.tier.toLowerCase()));
-    const activeDevices = all.filter(d => getHeartbeatStatus(d).label === 'Active');
-    
+    const activeDevices = all.filter(d => isDeviceOnline(d.deviceUUID));
+
     return {
       total: all.length,
       withAccount: withAccount.length,
@@ -85,7 +89,7 @@ export default function Users() {
       paid: paidDevices.length,
       active: activeDevices.length,
     };
-  }, [devices]);
+  }, [devices, isDeviceOnline]);
 
   const filteredDevices = useMemo(() => {
     let list = devices ?? [];
@@ -100,13 +104,11 @@ export default function Users() {
       );
     }
     
-    // Status filter
+    // Status filter (socket-based real-time)
     if (statusFilter === "active") {
-      list = list.filter((d) => getHeartbeatStatus(d).label === "Active");
-    } else if (statusFilter === "idle") {
-      list = list.filter((d) => getHeartbeatStatus(d).label === "Idle");
+      list = list.filter((d) => isDeviceOnline(d.deviceUUID));
     } else if (statusFilter === "offline") {
-      list = list.filter((d) => getHeartbeatStatus(d).label === "Offline" || getHeartbeatStatus(d).label === "Never");
+      list = list.filter((d) => !isDeviceOnline(d.deviceUUID));
     }
     
     // Account filter
@@ -130,7 +132,7 @@ export default function Users() {
     }
     
     return list;
-  }, [devices, search, statusFilter, accountFilter, licenseFilter]);
+  }, [devices, search, statusFilter, accountFilter, licenseFilter, isDeviceOnline]);
 
   const getTierBadge = (tier: string | null | undefined, state?: string | null) => {
     if (!tier) return null;
@@ -334,7 +336,6 @@ export default function Users() {
           <SelectContent>
             <SelectItem value="all">All status</SelectItem>
             <SelectItem value="active">Active</SelectItem>
-            <SelectItem value="idle">Idle</SelectItem>
             <SelectItem value="offline">Offline</SelectItem>
           </SelectContent>
         </Select>
@@ -408,18 +409,18 @@ export default function Users() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filteredDevices.map((device) => {
-            const heartbeat = getHeartbeatStatus(device);
+            const online = isDeviceOnline(device.deviceUUID);
             return (
-              <div 
-                key={device.deviceUUID} 
+              <div
+                key={device.deviceUUID}
                 className="glass-card rounded-xl p-5 hover:border-white/20 transition-colors"
                 data-testid={`user-card-${device.deviceIndex}`}
               >
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-3">
                     <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                      device.isOnline 
-                        ? 'bg-green-500/10 text-green-500' 
+                      online
+                        ? 'bg-green-500/10 text-green-500'
                         : 'bg-white/5 text-muted-foreground'
                     }`}>
                       {getPlatformIcon(device.platform)}
@@ -434,14 +435,15 @@ export default function Users() {
                     </div>
                   </div>
                   <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium ${
-                    heartbeat.color === 'bg-green-500' 
+                    online
                       ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                      : heartbeat.color === 'bg-yellow-500'
-                      ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
                       : 'bg-white/5 text-muted-foreground border border-white/10'
                   }`}>
-                    <div className={`w-1.5 h-1.5 rounded-full ${heartbeat.dotColor}`} />
-                    {heartbeat.label}
+                    {online
+                      ? <Wifi className="w-3 h-3" />
+                      : <WifiOff className="w-3 h-3" />
+                    }
+                    {online ? 'Active' : 'Offline'}
                   </div>
                 </div>
 
