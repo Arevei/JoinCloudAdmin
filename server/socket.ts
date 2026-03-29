@@ -1,5 +1,5 @@
 import { Server as SocketIOServer } from "socket.io";
-import { createServer } from "http";
+import type { Server as HttpServer } from "http";
 import { db } from "./db";
 import { hosts } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -35,19 +35,18 @@ export function emitToAdmins(event: string, data: unknown): void {
 }
 
 /**
- * Start the standalone Socket.IO server on SOCKET_PORT (default 3001).
- * NOT attached to the admin Express server — runs as its own HTTP server.
+ * Attach Socket.IO to the existing Express HTTP server.
+ * In production (Render/Docker) only one port is exposed, so the socket
+ * must share the same server as Express rather than running on a separate port.
  */
-export function startSocketServer(): void {
-  const socketHttp = createServer();
-
-  const io = new SocketIOServer(socketHttp, {
+export function startSocketServer(httpServer: HttpServer): void {
+  const io = new SocketIOServer(httpServer, {
     cors: {
       origin: "*",
       methods: ["GET", "POST"],
-      credentials: true,
     },
     transports: ["websocket", "polling"],
+    path: "/socket.io",
   });
 
   _io = io;
@@ -193,7 +192,5 @@ export function startSocketServer(): void {
     });
   });
 
-  socketHttp.listen(SOCKET_PORT, () => {
-    console.log(`[socket] Standalone Socket.IO server running on port ${SOCKET_PORT}`);
-  });
+  console.log(`[socket] Socket.IO attached to Express HTTP server`);
 }

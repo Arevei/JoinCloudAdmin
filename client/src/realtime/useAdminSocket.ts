@@ -62,13 +62,13 @@ export function useAdminSocket(enabled = true): UseAdminSocketReturn {
     let isOwner = false;
     let socket: Socket;
 
-    if (_socket && (_socket.connected || _socket.connecting)) {
+    if (_socket && (_socket.connected || _socket.active)) {
       // Reuse the existing socket — but still register our own handlers below
       socket = _socket;
     } else {
-      // Socket.IO runs on a standalone port (VITE_SOCKET_PORT, default 3001), separate from the Express server
-      const socketPort = (import.meta.env.VITE_SOCKET_PORT as string) || "3001";
-      const socketUrl = `${window.location.protocol}//${window.location.hostname}:${socketPort}`;
+      // Socket.IO is now on the same server as Express (same origin, same port).
+      // This works in both dev and production with no extra port needed.
+      const socketUrl = `${window.location.protocol}//${window.location.host}`;
       socket = io(`${socketUrl}/admin`, {
         withCredentials: true,
         transports: ["websocket", "polling"],

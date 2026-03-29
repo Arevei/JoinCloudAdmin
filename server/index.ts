@@ -10,8 +10,8 @@ import { startSocketServer } from "./socket";
 const app = express();
 const httpServer = createServer(app);
 
-// Start the standalone Socket.IO server (separate port, not injected into admin HTTP server)
-startSocketServer();
+// Attach Socket.IO to the shared Express HTTP server (required for Render/Docker — only one port exposed)
+startSocketServer(httpServer);
 
 declare module "http" {
   interface IncomingMessage {

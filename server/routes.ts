@@ -3477,7 +3477,6 @@ export async function registerRoutes(
         account_id: license.accountId,
         account_email: accountEmail,
         display_name: displayName ?? "Join",
-        socket_port: parseInt(process.env.SOCKET_PORT || "3001", 10),
         entitlements,
         usage: {
           sharesThisMonth: await (async () => {
@@ -3514,7 +3513,6 @@ export async function registerRoutes(
         dev_mode: IS_DEV,
         dev_trial_minutes: devTrialMins,
         dev_expiry_warning_minutes: devWarningMins,
-        socket_port: parseInt(process.env.SOCKET_PORT || "3001", 10),
         usage: {
           sharesThisMonth: 0,
           devicesLinked: 0,
