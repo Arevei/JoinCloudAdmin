@@ -35,20 +35,23 @@ export default {
       }
     }
 
+    const upstreamHeaders = {
+      "x-tunnel-source": "cloudflare",
+    };
+    const rangeHeader = request.headers.get("range");
+    if (rangeHeader) upstreamHeaders["range"] = rangeHeader;
+    const contentTypeHeader = request.headers.get("content-type");
+    if (contentTypeHeader) upstreamHeaders["content-type"] = contentTypeHeader;
+
     const upstreamReq = new Request(upstreamUrl.toString(), {
       method: request.method,
-      headers: {
-        "x-tunnel-source": "cloudflare",
-        ...(request.headers.get("content-type")
-          ? { "content-type": request.headers.get("content-type") }
-          : {}),
-      },
+      headers: upstreamHeaders,
       body: ["POST", "PUT", "PATCH"].includes(request.method)
         ? request.body
         : undefined,
     });
 
-    const upstreamRes = await fetch(upstreamReq);
+    const upstreamRes = await fetch(upstreamReq, { cf: { cacheEverything: false } });
 
     if (!upstreamRes.ok && subPath === "") {
       return new Response("Failed to fetch share from tunnel", {
@@ -75,9 +78,28 @@ export default {
     const headers = new Headers();
     const ct = upstreamRes.headers.get("content-type");
     const cd = upstreamRes.headers.get("content-disposition");
+    const cr = upstreamRes.headers.get("content-range");
+    const ar = upstreamRes.headers.get("accept-ranges");
+    const cl = upstreamRes.headers.get("content-length");
+    const ce = upstreamRes.headers.get("content-encoding");
+    const vary = upstreamRes.headers.get("vary");
+    const xjrs = upstreamRes.headers.get("x-joincloud-range-support");
+    const xcto = upstreamRes.headers.get("x-content-type-options");
+    const cc = upstreamRes.headers.get("cache-control");
+
     if (ct) headers.set("content-type", ct);
     if (cd) headers.set("content-disposition", cd);
-    headers.set("cache-control", "no-store");
+    if (cr) headers.set("content-range", cr);
+    if (ar) headers.set("accept-ranges", ar);
+    if (cl) headers.set("content-length", cl);
+    if (ce) headers.set("content-encoding", ce);
+    if (vary) headers.set("vary", vary);
+    if (xjrs) headers.set("x-joincloud-range-support", xjrs);
+    if (xcto) headers.set("x-content-type-options", xcto);
+    if (cc) headers.set("cache-control", cc);
+
+    // Ensure proper caching for range requests
+    if (!cc) headers.set("cache-control", "no-store");
 
     return new Response(upstreamRes.body, {
       status: upstreamRes.status,
