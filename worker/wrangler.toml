@@ -8,3 +8,17 @@ routes = [
 
 [vars]
 CONTROL_PLANE = "https://plane.joincloud.in"
+
+# R2 bucket — stores cached files served to concurrent downloaders
+# Create with: wrangler r2 bucket create joincloud-share-cache
+[[r2_buckets]]
+binding = "joincloud_share_cache"
+bucket_name = "joincloud-share-cache"
+
+# KV namespace — tracks concurrent request count per share link
+# Create with: wrangler kv:namespace create "CONCURRENT_KV"
+# Then fill in the id and preview_id below
+[[kv_namespaces]]
+binding = "CONCURRENT_KV"
+id = "1e372e2bcdd24d3590c2c59501fc00fd"
+preview_id = "1e372e2bcdd24d3590c2c59501fc00fd"

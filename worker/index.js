@@ -1,7 +1,105 @@
 const CONTROL_PLANE = "https://plane.joincloud.in";
 
+// Only cache simple single-file downloads, not ZIP, HLS segments, or previews
+function isCacheableDownload(subPath) {
+  return subPath === "/download";
+}
+
+// Parse an HTTP Range header into R2-compatible range options
+function parseRangeForR2(rangeHeader, totalSize) {
+  if (!rangeHeader) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!m) return null;
+  const startRaw = m[1];
+  const endRaw = m[2];
+  if (!startRaw && !endRaw) return null;
+  let start, end;
+  if (!startRaw && endRaw) {
+    // suffix range: bytes=-N  →  last N bytes
+    const suffix = parseInt(endRaw);
+    start = Math.max(0, totalSize - suffix);
+    end = totalSize - 1;
+  } else {
+    start = parseInt(startRaw);
+    end = endRaw ? parseInt(endRaw) : totalSize - 1;
+  }
+  if (isNaN(start) || isNaN(end) || start > end || start >= totalSize) return null;
+  end = Math.min(end, totalSize - 1);
+  return { offset: start, length: end - start + 1, start, end };
+}
+
+// Serve a cached file from R2, supporting range requests
+async function serveFromR2(env, r2Key, request) {
+  const rangeHeader = request.headers.get("range");
+  const totalSize = parseInt((await env.FILE_CACHE.head(r2Key))?.customMetadata?.contentLength || "0");
+
+  const range = rangeHeader && totalSize > 0 ? parseRangeForR2(rangeHeader, totalSize) : null;
+
+  const object = range
+    ? await env.FILE_CACHE.get(r2Key, { range: { offset: range.offset, length: range.length } })
+    : await env.FILE_CACHE.get(r2Key);
+
+  if (!object) return null;
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("accept-ranges", "bytes");
+  headers.set("x-joincloud-range-support", "bytes");
+  headers.set("x-jc-served-by", "r2-cache");
+  headers.set("cache-control", "no-store");
+  headers.set("vary", "Range");
+
+  if (range && totalSize > 0) {
+    headers.set("content-range", `bytes ${range.start}-${range.end}/${totalSize}`);
+    headers.set("content-length", String(range.length));
+    return new Response(object.body, { status: 206, headers });
+  }
+
+  if (totalSize > 0) headers.set("content-length", String(totalSize));
+  return new Response(object.body, { status: 200, headers });
+}
+
+// Pull the full file from the sharer's tunnel and store it in R2.
+// Called via ctx.waitUntil — runs in background after response is sent.
+async function cacheFileToR2(env, r2Key, tunnelUrl, shareId, token, exp) {
+  const downloadUrl = new URL(`${tunnelUrl}/share/${shareId}/download`);
+  downloadUrl.searchParams.set("token", token);
+  downloadUrl.searchParams.set("exp", String(exp));
+
+  let res;
+  try {
+    res = await fetch(downloadUrl.toString(), {
+      headers: { "x-tunnel-source": "cloudflare" },
+    });
+  } catch (_) {
+    return; // sharer offline
+  }
+
+  if (!res.ok || !res.body) return;
+
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  const contentLength = res.headers.get("content-length") || "";
+  const contentDisposition = res.headers.get("content-disposition") || "";
+
+  try {
+    await env.FILE_CACHE.put(r2Key, res.body, {
+      httpMetadata: {
+        contentType,
+        contentDisposition: contentDisposition || undefined,
+      },
+      customMetadata: {
+        cachedAt: String(Date.now()),
+        contentLength,
+        cacheComplete: "true",
+      },
+    });
+  } catch (_) {
+    // R2 put failed — ignore, sharer will serve next time
+  }
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     const match = url.pathname.match(/^\/s\/([A-Za-z0-9_-]+)(\/.*)?$/);
@@ -12,6 +110,20 @@ export default {
     const shortId = match[1];
     const subPath = match[2] || "";
 
+    // ── Priority 3: Serve from R2 cache if already cached ──────────────────
+    if (isCacheableDownload(subPath) && env.FILE_CACHE) {
+      try {
+        const head = await env.FILE_CACHE.head(`share/${shortId}`);
+        if (head && head.customMetadata?.cacheComplete === "true") {
+          const r2Response = await serveFromR2(env, `share/${shortId}`, request);
+          if (r2Response) return r2Response;
+        }
+      } catch (_) {
+        // R2 unavailable — fall through to proxy
+      }
+    }
+
+    // ── Resolve short ID → tunnel URL via admin control plane ───────────────
     const resolveRes = await fetch(
       `${CONTROL_PLANE}/api/v1/share/resolve/${shortId}`,
       { headers: { "x-worker-secret": env.WORKER_SECRET } }
@@ -25,6 +137,31 @@ export default {
 
     const { tunnelUrl, shareId, token, exp } = await resolveRes.json();
 
+    // ── Priority 2: Concurrent detection → trigger R2 cache ─────────────────
+    if (isCacheableDownload(subPath) && env.CONCURRENT_KV && env.FILE_CACHE) {
+      try {
+        const concurrentKey = `concurrent:${shortId}`;
+        const cachingKey = `caching:${shortId}`;
+        const countStr = await env.CONCURRENT_KV.get(concurrentKey);
+        const currentCount = parseInt(countStr || "0");
+        // Increment with 5-minute TTL (approximate — KV is eventually consistent)
+        await env.CONCURRENT_KV.put(concurrentKey, String(currentCount + 1), {
+          expirationTtl: 300,
+        });
+        // If 2nd+ concurrent request and not already caching → trigger R2 cache
+        if (currentCount >= 1) {
+          const alreadyCaching = await env.CONCURRENT_KV.get(cachingKey);
+          if (!alreadyCaching) {
+            await env.CONCURRENT_KV.put(cachingKey, "1", { expirationTtl: 3600 });
+            ctx.waitUntil(cacheFileToR2(env, `share/${shortId}`, tunnelUrl, shareId, token, exp));
+          }
+        }
+      } catch (_) {
+        // KV unavailable — continue without caching
+      }
+    }
+
+    // ── Proxy to sharer's tunnel ─────────────────────────────────────────────
     const upstreamUrl = new URL(`${tunnelUrl}/share/${shareId}${subPath}`);
     upstreamUrl.searchParams.set("token", token);
     upstreamUrl.searchParams.set("exp", exp);
@@ -97,8 +234,6 @@ export default {
     if (xjrs) headers.set("x-joincloud-range-support", xjrs);
     if (xcto) headers.set("x-content-type-options", xcto);
     if (cc) headers.set("cache-control", cc);
-
-    // Ensure proper caching for range requests
     if (!cc) headers.set("cache-control", "no-store");
 
     return new Response(upstreamRes.body, {
@@ -107,4 +242,3 @@ export default {
     });
   },
 };
-
