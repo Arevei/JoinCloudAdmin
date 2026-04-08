@@ -31,13 +31,13 @@ function parseRangeForR2(rangeHeader, totalSize) {
 // Serve a cached file from R2, supporting range requests
 async function serveFromR2(env, r2Key, request) {
   const rangeHeader = request.headers.get("range");
-  const totalSize = parseInt((await env.FILE_CACHE.head(r2Key))?.customMetadata?.contentLength || "0");
+  const totalSize = parseInt((await env.joincloud_share_cache.head(r2Key))?.customMetadata?.contentLength || "0");
 
   const range = rangeHeader && totalSize > 0 ? parseRangeForR2(rangeHeader, totalSize) : null;
 
   const object = range
-    ? await env.FILE_CACHE.get(r2Key, { range: { offset: range.offset, length: range.length } })
-    : await env.FILE_CACHE.get(r2Key);
+    ? await env.joincloud_share_cache.get(r2Key, { range: { offset: range.offset, length: range.length } })
+    : await env.joincloud_share_cache.get(r2Key);
 
   if (!object) return null;
 
@@ -82,7 +82,7 @@ async function cacheFileToR2(env, r2Key, tunnelUrl, shareId, token, exp) {
   const contentDisposition = res.headers.get("content-disposition") || "";
 
   try {
-    await env.FILE_CACHE.put(r2Key, res.body, {
+    await env.joincloud_share_cache.put(r2Key, res.body, {
       httpMetadata: {
         contentType,
         contentDisposition: contentDisposition || undefined,
@@ -111,9 +111,9 @@ export default {
     const subPath = match[2] || "";
 
     // ── Priority 3: Serve from R2 cache if already cached ──────────────────
-    if (isCacheableDownload(subPath) && env.FILE_CACHE) {
+    if (isCacheableDownload(subPath) && env.joincloud_share_cache) {
       try {
-        const head = await env.FILE_CACHE.head(`share/${shortId}`);
+        const head = await env.joincloud_share_cache.head(`share/${shortId}`);
         if (head && head.customMetadata?.cacheComplete === "true") {
           const r2Response = await serveFromR2(env, `share/${shortId}`, request);
           if (r2Response) return r2Response;
@@ -138,7 +138,7 @@ export default {
     const { tunnelUrl, shareId, token, exp } = await resolveRes.json();
 
     // ── Priority 2: Concurrent detection → trigger R2 cache ─────────────────
-    if (isCacheableDownload(subPath) && env.CONCURRENT_KV && env.FILE_CACHE) {
+    if (isCacheableDownload(subPath) && env.CONCURRENT_KV && env.joincloud_share_cache) {
       try {
         const concurrentKey = `concurrent:${shortId}`;
         const cachingKey = `caching:${shortId}`;

@@ -4,7 +4,7 @@
  */
 
 export type LicenseState = "TRIAL" | "FREE" | "ACTIVE" | "EXPIRED";
-export type Tier = "FREE" | "PRO" | "TEAMS" | "CUSTOM";
+export type Tier = "FREE" | "PRO" | "PRO_PLUS" | "TEAMS" | "CUSTOM";
 
 export interface Entitlements {
   teamEnabled: boolean;
@@ -13,6 +13,10 @@ export interface Entitlements {
   maxDevicesPerUser: number | null;
   maxDevicesTotal: number | null;
   shareLimitMonthly: number | null;
+  fileSizeLimitMb: number | null;       // null = unlimited
+  linkExpiryMaxDays: number | null;     // max TTL in days a user can set; null = unlimited
+  resumableDownloads: boolean;          // P4 resumable download feature
+  cdnCache: boolean;                    // R2 CDN cache (P3)
   peerChatEnabled: boolean;
   canExtendTrial: boolean;
   uiTeasers: {
@@ -36,8 +40,12 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     maxTeams: 0,
     maxUsers: 1,
     maxDevicesPerUser: 1,
-    maxDevicesTotal: 1,       // 1 device only on free tier
-    shareLimitMonthly: 10,    // 10 shares/month
+    maxDevicesTotal: 1,
+    shareLimitMonthly: 5,
+    fileSizeLimitMb: 2048,             // 2 GB
+    linkExpiryMaxDays: 1,              // max 24 hours
+    resumableDownloads: false,
+    cdnCache: false,
     peerChatEnabled: true,
     canExtendTrial: true,
     uiTeasers: { showTeamsMenu: false, teamsLocked: true },
@@ -47,19 +55,42 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     maxTeams: 0,
     maxUsers: 1,
     maxDevicesPerUser: 3,
-    maxDevicesTotal: 3,       // 3 devices on pro
-    shareLimitMonthly: 50,    // 50 shares/month
+    maxDevicesTotal: 3,
+    shareLimitMonthly: 50,
+    fileSizeLimitMb: 20480,            // 20 GB
+    linkExpiryMaxDays: 30,
+    resumableDownloads: true,
+    cdnCache: true,
     peerChatEnabled: true,
     canExtendTrial: false,
     uiTeasers: { showTeamsMenu: false, teamsLocked: true },
   },
+  PRO_PLUS: {
+    teamEnabled: true,
+    maxTeams: 1,
+    maxUsers: 5,
+    maxDevicesPerUser: 5,
+    maxDevicesTotal: 25,
+    shareLimitMonthly: null,           // unlimited
+    fileSizeLimitMb: null,             // unlimited
+    linkExpiryMaxDays: 90,
+    resumableDownloads: true,
+    cdnCache: true,
+    peerChatEnabled: true,
+    canExtendTrial: false,
+    uiTeasers: { showTeamsMenu: true, teamsLocked: false },
+  },
   TEAMS: {
     teamEnabled: true,
-    maxTeams: 3,              // up to 3 team spaces
-    maxUsers: 3,              // up to 3 users
-    maxDevicesPerUser: 3,     // 3 devices per user
-    maxDevicesTotal: 9,       // 3 users × 3 devices
-    shareLimitMonthly: 100,   // 100 shares/month per user
+    maxTeams: 3,
+    maxUsers: 3,
+    maxDevicesPerUser: 3,
+    maxDevicesTotal: 9,
+    shareLimitMonthly: 100,
+    fileSizeLimitMb: null,
+    linkExpiryMaxDays: 90,
+    resumableDownloads: true,
+    cdnCache: true,
     peerChatEnabled: true,
     canExtendTrial: false,
     uiTeasers: { showTeamsMenu: true, teamsLocked: false },
@@ -71,6 +102,10 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     maxDevicesPerUser: 5,
     maxDevicesTotal: 5,
     shareLimitMonthly: 10,
+    fileSizeLimitMb: null,
+    linkExpiryMaxDays: 365,
+    resumableDownloads: true,
+    cdnCache: true,
     peerChatEnabled: true,
     canExtendTrial: false,
     uiTeasers: { showTeamsMenu: false, teamsLocked: true },
@@ -84,9 +119,13 @@ export interface CustomOverrides {
   maxDevicesTotal?: number;
   maxTeams?: number;
   teamEnabled?: boolean;
+  fileSizeLimitMb?: number | null;
+  linkExpiryMaxDays?: number | null;
+  resumableDownloads?: boolean;
+  cdnCache?: boolean;
 }
 
-/** Resolve entitlements by license state. TRIAL = full access; ACTIVE = tier limits; EXPIRED/FREE = restricted. */
+/** Resolve entitlements by license state. TRIAL = pro-like access for 14 days; ACTIVE = tier limits; EXPIRED/FREE = restricted. */
 export function resolveEntitlementsByState(
   licenseState: string,
   tier: string,
@@ -96,16 +135,19 @@ export function resolveEntitlementsByState(
   const normalized = String(licenseState || "").toUpperCase().replace(/-/g, "_");
   if (normalized === "TRIAL" || normalized === "TRIAL_ACTIVE") {
     return {
-      teamEnabled: true,
-      maxTeams: null,
-      maxUsers: null,
-      // Trial uses Pro-like usage/device limits while preserving trial UX flow.
+      teamEnabled: false,
+      maxTeams: 0,
+      maxUsers: 1,
       maxDevicesPerUser: 3,
       maxDevicesTotal: 3,
-      shareLimitMonthly: 50,
+      shareLimitMonthly: 20,
+      fileSizeLimitMb: 20480,          // 20 GB during trial
+      linkExpiryMaxDays: 7,
+      resumableDownloads: true,
+      cdnCache: false,
       peerChatEnabled: true,
       canExtendTrial,
-      uiTeasers: { showTeamsMenu: true, teamsLocked: false },
+      uiTeasers: { showTeamsMenu: false, teamsLocked: true },
     };
   }
   if (normalized === "EXPIRED" || normalized === "FREE" || normalized === "UNREGISTERED") {
@@ -115,8 +157,8 @@ export function resolveEntitlementsByState(
       uiTeasers: { showTeamsMenu: false, teamsLocked: true },
     };
   }
-  const tierKey = (tier || "free").toLowerCase();
-  const base = TIER_DEFAULTS[tierKey as Tier] ?? TIER_DEFAULTS.FREE;
+  const tierKey = (tier || "free").toUpperCase() as Tier;
+  const base = TIER_DEFAULTS[tierKey] ?? TIER_DEFAULTS.FREE;
   return { ...base, canExtendTrial };
 }
 
@@ -135,6 +177,10 @@ export function mergeEntitlements(
   if (overrides.maxTeams != null) base.maxTeams = overrides.maxTeams;
   if (overrides.teamEnabled != null) base.teamEnabled = overrides.teamEnabled;
   if (overrides.teamEnabled === true) base.uiTeasers = { ...base.uiTeasers, teamsLocked: false };
+  if ("fileSizeLimitMb" in overrides) base.fileSizeLimitMb = overrides.fileSizeLimitMb ?? null;
+  if ("linkExpiryMaxDays" in overrides) base.linkExpiryMaxDays = overrides.linkExpiryMaxDays ?? null;
+  if (overrides.resumableDownloads != null) base.resumableDownloads = overrides.resumableDownloads;
+  if (overrides.cdnCache != null) base.cdnCache = overrides.cdnCache;
 
   return base;
 }

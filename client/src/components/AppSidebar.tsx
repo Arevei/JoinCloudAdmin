@@ -13,10 +13,10 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
-import { 
-  LayoutDashboard, 
-  Users, 
-  Trophy, 
+import {
+  LayoutDashboard,
+  Users,
+  Trophy,
   MessageSquare,
   Activity,
   Key,
@@ -25,6 +25,7 @@ import {
   Download,
   Settings,
   ClipboardList,
+  LayoutList,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -78,6 +79,11 @@ const menuItems = [
     title: "Updates",
     url: "/updates",
     icon: Download,
+  },
+  {
+    title: "Plans",
+    url: "/plans",
+    icon: LayoutList,
   },
   {
     title: "Settings",

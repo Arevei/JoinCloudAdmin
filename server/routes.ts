@@ -1911,6 +1911,15 @@ export async function registerRoutes(
         });
       }
 
+      // Push real-time plan update to the device (same as License section modify)
+      emitLicenseUpdated({
+        id: license.id,
+        accountId: license.accountId,
+        state: "active",
+        tier: license.tier,
+        expiresAt,
+      });
+
       res.json({
         success: true,
         licenseId: license.id,
@@ -2312,6 +2321,15 @@ export async function registerRoutes(
         licenseId,
         approvedBy: adminId,
         approvedAt: approvedAtIso,
+      });
+
+      // Push real-time plan update to device
+      emitLicenseUpdated({
+        id: licenseId,
+        accountId,
+        state: "active",
+        tier,
+        expiresAt,
       });
 
       // Notify user of license grant

@@ -19,6 +19,7 @@ import Subscriptions from "@/pages/Subscriptions";
 import ManualRequests from "@/pages/ManualRequests";
 import Updates from "@/pages/Updates";
 import Settings from "@/pages/Settings";
+import Plans from "@/pages/Plans";
 import Unauthorized from "@/pages/Unauthorized";
 import NotFound from "@/pages/not-found";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
@@ -42,6 +43,7 @@ function Router() {
       <Route path="/manual-requests" component={ManualRequests} />
       <Route path="/updates" component={Updates} />
       <Route path="/settings" component={Settings} />
+      <Route path="/plans" component={Plans} />
       <Route component={NotFound} />
     </Switch>
   );
