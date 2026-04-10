@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
   Monitor,
@@ -19,6 +19,7 @@ import {
   Users as UsersIcon,
   Wifi,
   WifiOff,
+  Trash2,
 } from "lucide-react";
 import { useAdminSocket } from "@/realtime/useAdminSocket";
 import { Button } from "@/components/ui/button";
@@ -44,12 +45,19 @@ export type DeviceWithAccount = Device & {
 };
 
 export default function Users() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
   const [licenseFilter, setLicenseFilter] = useState<string>("all");
   const { toast } = useToast();
   const { isDeviceOnline } = useAdminSocket();
+
+  const hasVisibleLinkedAccount = (device: DeviceWithAccount) =>
+    !!(device.accountEmail && !device.accountEmail.includes('@device.local'));
+
+  const hasAnyLinkedLicenseOrAccount = (device: DeviceWithAccount) =>
+    hasVisibleLinkedAccount(device) || !!device.licenseId;
 
   const { data: devices, isLoading, error } = useQuery<DeviceWithAccount[]>({
     queryKey: ['/api/admin/devices'],
@@ -72,11 +80,29 @@ export default function Users() {
     },
   });
 
+  // const deleteDevice = useMutation({
+  //   mutationFn: async (hostUuid: string) => {
+  //     const res = await fetch(`/api/admin/devices/${encodeURIComponent(hostUuid)}`, { method: "DELETE" });
+  //     if (!res.ok) {
+  //       const data = await res.json().catch(() => ({}));
+  //       throw new Error(data.message || "Failed to delete device");
+  //     }
+  //     return res.json();
+  //   },
+  //   onSuccess: () => {
+  //     queryClient.invalidateQueries({ queryKey: ['/api/admin/devices'] });
+  //     toast({ title: "Device deleted", description: "The device and its stored telemetry were removed." });
+  //   },
+  //   onError: (err: Error) => {
+  //     toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+  //   },
+  // });
+
   // Calculate stats
   const stats = useMemo(() => {
     const all = devices ?? [];
-    const withAccount = all.filter(d => d.accountEmail && !d.accountEmail.includes('@device.local'));
-    const withoutAccount = all.filter(d => !d.accountEmail || d.accountEmail.includes('@device.local'));
+    const withAccount = all.filter((d) => hasAnyLinkedLicenseOrAccount(d));
+    const withoutAccount = all.filter((d) => !hasAnyLinkedLicenseOrAccount(d));
     const trialDevices = all.filter(d => d.tier?.toLowerCase() === 'trial');
     const paidDevices = all.filter(d => d.tier && ['pro', 'teams'].includes(d.tier.toLowerCase()));
     const activeDevices = all.filter(d => isDeviceOnline(d.deviceUUID));
@@ -113,9 +139,9 @@ export default function Users() {
     
     // Account filter
     if (accountFilter === "with_account") {
-      list = list.filter((d) => d.accountEmail && !d.accountEmail.includes('@device.local'));
+      list = list.filter((d) => hasAnyLinkedLicenseOrAccount(d));
     } else if (accountFilter === "without_account") {
-      list = list.filter((d) => !d.accountEmail || d.accountEmail.includes('@device.local'));
+      list = list.filter((d) => !hasAnyLinkedLicenseOrAccount(d));
     }
     
     // License filter
@@ -464,10 +490,15 @@ export default function Users() {
                 </div>
                 <div className="text-xs text-muted-foreground mb-4">
                   <span className="text-muted-foreground/80">Account: </span>
-                  {device.accountEmail && !device.accountEmail.includes('@device.local') ? (
+                  {hasVisibleLinkedAccount(device) ? (
                     <span className="text-white flex items-center gap-1 inline-flex">
                       <UserCheck className="w-3 h-3 text-green-400" />
                       {device.accountEmail}
+                    </span>
+                  ) : device.licenseId ? (
+                    <span className="text-white flex items-center gap-1 inline-flex">
+                      <UserCheck className="w-3 h-3 text-green-400" />
+                      Device {shortenUUID(device.deviceUUID)}
                     </span>
                   ) : (
                     <span className="text-orange-400 flex items-center gap-1 inline-flex">
@@ -522,6 +553,22 @@ export default function Users() {
                   >
                     <LogOut className="w-4 h-4" />
                   </Button>
+                  {/* <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => {
+                      const confirmed = window.confirm(
+                        `Delete device ${device.deviceIndex} (${shortenUUID(device.deviceUUID)})? This removes the device entry and stored telemetry.`,
+                      );
+                      if (confirmed) deleteDevice.mutate(device.deviceUUID);
+                    }}
+                    disabled={deleteDevice.isPending}
+                    title="Delete this device"
+                    data-testid={`button-delete-${device.deviceIndex}`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button> */}
                 </div>
               </div>
             );

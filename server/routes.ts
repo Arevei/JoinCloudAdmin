@@ -575,7 +575,14 @@ export async function registerRoutes(
   // Get single device
   app.get("/api/admin/devices/:deviceUUID", async (req, res) => {
     try {
-      const device = await storage.getDevice(req.params.deviceUUID);
+      const deviceUUID = req.params.deviceUUID;
+      const devices = await storage.getDevicesWithAccountInfo();
+      const enrichedDevice = devices.find((d) => d.deviceUUID === deviceUUID);
+      if (enrichedDevice) {
+        res.json(enrichedDevice);
+        return;
+      }
+      const device = await storage.getDevice(deviceUUID);
       if (!device) {
         res.status(404).json({ message: "Device not found" });
         return;
@@ -586,6 +593,20 @@ export async function registerRoutes(
       res.status(500).json({ message: "Internal Server Error" });
     }
   });
+
+  // app.delete("/api/admin/devices/:deviceUUID", async (req, res) => {
+  //   try {
+  //     const deleted = await storage.deleteDevice(req.params.deviceUUID);
+  //     if (!deleted) {
+  //       res.status(404).json({ message: "Device not found" });
+  //       return;
+  //     }
+  //     res.json({ success: true });
+  //   } catch (err) {
+  //     console.error("Device delete error:", err);
+  //     res.status(500).json({ message: "Internal Server Error" });
+  //   }
+  // });
 
   // === SUPPORT MESSAGING ===
 
@@ -1151,10 +1172,17 @@ export async function registerRoutes(
         return;
       }
 
+      const existingCount = await storage.getShareCountSinceCycleStart(deviceId, cycleStartSec);
+      if (limit < 999999 && existingCount >= limit) {
+        res.json({ allowed: false, remaining: 0, limit, used: limit });
+        return;
+      }
+
       const { count } = await storage.incrementSharesForCycle(deviceId, cycleStartSec);
       const allowed = count <= limit;
-      const remaining = limit >= 999999 ? null : Math.max(0, limit - count);
-      res.json({ allowed, remaining, limit: limit >= 999999 ? null : limit });
+      const visibleCount = limit >= 999999 ? count : Math.min(count, limit);
+      const remaining = limit >= 999999 ? null : Math.max(0, limit - visibleCount);
+      res.json({ allowed, remaining, limit: limit >= 999999 ? null : limit, used: visibleCount });
     } catch (err) {
       if (err instanceof z.ZodError) {
         res.status(400).json({ message: err.errors[0].message });
@@ -2330,6 +2358,8 @@ export async function registerRoutes(
         state: "active",
         tier,
         expiresAt,
+        deviceLimit,
+        shareLimitMonthly: body.share_limit_monthly ?? null,
       });
 
       // Notify user of license grant

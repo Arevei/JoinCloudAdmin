@@ -73,6 +73,29 @@ interface AccountDetails {
   createdAt: string;
 }
 
+interface DeviceAccountSummary {
+  account?: {
+    id: string;
+    email: string | null;
+    username?: string | null;
+    isDeviceOnly?: boolean;
+  } | null;
+  license?: {
+    id: string;
+    tier: string;
+    device_limit: number;
+    state: string;
+    expires_at: number;
+    grace_ends_at?: number;
+  } | null;
+  subscription?: {
+    status?: string;
+    renewal_at?: string;
+    plan_interval?: string;
+    grace_ends_at?: string;
+  } | null;
+}
+
 export default function UserDetails() {
   const { deviceUUID } = useParams<{ deviceUUID: string }>();
   const queryClient = useQueryClient();
@@ -87,28 +110,95 @@ export default function UserDetails() {
     },
   });
 
-  const { data: license, isLoading: licenseLoading } = useQuery<LicenseDetails | null>({
-    queryKey: ["/api/admin/devices", deviceUUID, "license"],
+  const { data: summary } = useQuery<DeviceAccountSummary | null>({
+    queryKey: ["/api/v1/account/summary", deviceUUID],
     queryFn: async () => {
-      if (!device?.licenseId) return null;
+      const res = await fetch(`/api/v1/account/summary?host_uuid=${encodeURIComponent(deviceUUID)}`);
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!deviceUUID,
+  });
+
+  const summaryLicenseId = summary?.license?.id || null;
+  const deviceLicenseId = device?.licenseId || null;
+  const targetLicenseId = summaryLicenseId || deviceLicenseId;
+  const targetAccountId = summary?.account?.id || null;
+
+  const { data: license, isLoading: licenseLoading } = useQuery<LicenseDetails | null>({
+    queryKey: ["/api/admin/devices", deviceUUID, "license", targetLicenseId, summary?.license?.state, summary?.license?.tier, summary?.license?.expires_at],
+    queryFn: async () => {
+      if (!targetLicenseId) {
+        if (!summary?.license) return null;
+        return {
+          id: summary.license.id,
+          accountId: summary.account?.id || "",
+          accountEmail: summary.account?.email || null,
+          tier: summary.license.tier,
+          deviceLimit: summary.license.device_limit,
+          issuedAt: 0,
+          expiresAt: summary.license.expires_at,
+          state: summary.license.state,
+          hostCount: 0,
+          planInterval: summary.subscription?.plan_interval || null,
+          graceEndsAt: summary.license.grace_ends_at ?? null,
+          renewalAt: summary.subscription?.renewal_at ? Math.floor(new Date(summary.subscription.renewal_at).getTime() / 1000) : null,
+          customQuota: null,
+          shareLimit: null,
+          teamEnabled: false,
+          maxTeams: 0,
+        };
+      }
       const res = await fetch(`/api/admin/licenses`);
       if (!res.ok) return null;
       const licenses: LicenseDetails[] = await res.json();
-      return licenses.find((l) => l.id === device.licenseId) || null;
+      const matched = licenses.find((l) => l.id === targetLicenseId) || null;
+      if (matched) return matched;
+      if (!summary?.license) return null;
+      return {
+        id: summary.license.id,
+        accountId: summary.account?.id || "",
+        accountEmail: summary.account?.email || null,
+        tier: summary.license.tier,
+        deviceLimit: summary.license.device_limit,
+        issuedAt: 0,
+        expiresAt: summary.license.expires_at,
+        state: summary.license.state,
+        hostCount: 0,
+        planInterval: summary.subscription?.plan_interval || null,
+        graceEndsAt: summary.license.grace_ends_at ?? null,
+        renewalAt: summary.subscription?.renewal_at ? Math.floor(new Date(summary.subscription.renewal_at).getTime() / 1000) : null,
+        customQuota: null,
+        shareLimit: null,
+        teamEnabled: false,
+        maxTeams: 0,
+      };
     },
-    enabled: !!device?.licenseId,
+    enabled: !!deviceUUID && (!!targetLicenseId || !!summary?.license),
   });
 
   const { data: account, isLoading: accountLoading } = useQuery<AccountDetails | null>({
-    queryKey: ["/api/admin/devices", deviceUUID, "account"],
+    queryKey: ["/api/admin/devices", deviceUUID, "account", targetAccountId, device?.accountEmail || null],
     queryFn: async () => {
+      if (summary?.account?.id) {
+        return {
+          id: summary.account.id,
+          email: summary.account.email || `Device ${deviceUUID?.slice(0, 12)}`,
+          username: summary.account.username || null,
+          provider: summary.account.isDeviceOnly ? "Device License" : "Email",
+          trialEndsAt: null,
+          stripeCustomerId: null,
+          razorpayCustomerId: null,
+          createdAt: "",
+        };
+      }
       if (!device?.accountEmail) return null;
       const res = await fetch(`/api/admin/accounts`);
       if (!res.ok) return null;
       const accounts: AccountDetails[] = await res.json();
       return accounts.find((a) => a.email === device.accountEmail) || null;
     },
-    enabled: !!device?.accountEmail,
+    enabled: !!deviceUUID && (!!targetAccountId || !!device?.accountEmail),
   });
 
   const getPlatformIcon = (platform: string) => {
@@ -306,7 +396,7 @@ export default function UserDetails() {
               </div>
               <div>
                 <p className="text-xs text-muted-foreground mb-1">First Seen</p>
-                <p className="text-sm text-white">{formatDate(device.createdAt)}</p>
+                <p className="text-sm text-white">{formatDate(device.firstSeenAt)}</p>
               </div>
             </div>
           </CardContent>

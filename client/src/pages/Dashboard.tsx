@@ -223,7 +223,7 @@ export default function Dashboard() {
                   {isLoading ? "..." : formatBytes(advancedTelemetry?.totalUploadBytes7d ?? 0)}
                 </div>
               </div>
-              <div>
+              {/* <div>
                 <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
                   <Download className="w-3 h-3" />
                   Downloaded
@@ -231,7 +231,7 @@ export default function Dashboard() {
                 <div className="text-lg font-mono text-emerald-400">
                   {isLoading ? "..." : formatBytes(advancedTelemetry?.totalDownloadBytes7d ?? 0)}
                 </div>
-              </div>
+              </div> */}
               <div>
                 <span className="text-muted-foreground text-xs">Files uploaded (7d)</span>
                 <div className="text-lg font-medium text-white">
@@ -266,31 +266,7 @@ export default function Dashboard() {
 
         {/* Transfer Health & Export */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="glass-card p-6 rounded-2xl border border-white/5">
-            <h3 className="text-sm font-medium text-muted-foreground mb-4 uppercase tracking-wider">Transfer Health</h3>
-            <p className="text-xs text-muted-foreground mb-4">Logical throughput (not network speed)</p>
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <Upload className="w-4 h-4 text-primary" />
-                <span className="text-sm text-white">Upload Bandwidth</span>
-              </div>
-              <span className="text-xs text-primary font-mono">{formatBytes(data?.uploadBandwidthBytes || 0)}</span>
-            </div>
-            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden mb-4">
-              <div className="h-full bg-primary/50 w-[70%]" />
-            </div>
-            
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <Download className="w-4 h-4 text-emerald-500" />
-                <span className="text-sm text-white">Download Bandwidth</span>
-              </div>
-              <span className="text-xs text-emerald-500 font-mono">{formatBytes(data?.downloadBandwidthBytes || 0)}</span>
-            </div>
-            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-              <div className="h-full bg-emerald-500/50 w-[45%]" />
-            </div>
-          </div>
+          
 
           <div className="glass-card p-6 rounded-2xl border border-white/5 md:col-span-2 flex flex-col justify-center">
             <div className="flex items-center gap-4 mb-4">

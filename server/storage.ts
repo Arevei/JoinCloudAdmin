@@ -11,6 +11,8 @@ import {
   deviceUsageMonthly,
   deviceTrialUsed,
   deviceLogoutRequests,
+  tunnels,
+  publicShareLinks,
   accounts,
   licenses,
   licenseHosts,
@@ -291,6 +293,7 @@ export interface IStorage {
   getDevices(): Promise<Device[]>;
   getDevicesWithAccountInfo(): Promise<Array<Device & { accountEmail: string | null; licenseId: string | null; tier: string | null }>>;
   getDevice(deviceUUID: string): Promise<Device | null>;
+  deleteDevice(deviceUUID: string): Promise<boolean>;
   getOrCreateThread(deviceUUID: string): Promise<SupportThread>;
   getThreadByDevice(deviceUUID: string): Promise<SupportThread | null>;
   getAllThreads(): Promise<SupportThread[]>;
@@ -851,6 +854,53 @@ export class DrizzleStorage implements IStorage {
       lastHeartbeat: row.lastHeartbeat ?? null,
       isOnline: isOnline(activity),
     };
+  }
+
+  async deleteDevice(deviceUUID: string): Promise<boolean> {
+    const existingUser = await db
+      .select({ userId: users.userId })
+      .from(users)
+      .where(eq(users.userId, deviceUUID))
+      .limit(1);
+    const existingHost = await db
+      .select({ hostUuid: hosts.hostUuid })
+      .from(hosts)
+      .where(eq(hosts.hostUuid, deviceUUID))
+      .limit(1);
+
+    if (!existingUser.length && !existingHost.length) return false;
+
+    const threadRows = await db
+      .select({ id: supportThreads.id })
+      .from(supportThreads)
+      .where(eq(supportThreads.deviceUuid, deviceUUID))
+      .limit(1);
+    if (threadRows.length) {
+      await db.delete(supportMessages).where(eq(supportMessages.threadId, threadRows[0].id));
+      await db.delete(supportThreads).where(eq(supportThreads.id, threadRows[0].id));
+    }
+
+    await db.delete(dailyMetrics).where(eq(dailyMetrics.userId, deviceUUID));
+    await db.delete(deviceLogs).where(eq(deviceLogs.deviceUuid, deviceUUID));
+    await db.delete(deviceUsageMonthly).where(eq(deviceUsageMonthly.deviceId, deviceUUID));
+    await db.delete(deviceTrials).where(eq(deviceTrials.deviceId, deviceUUID));
+    await db.delete(deviceTrialUsed).where(eq(deviceTrialUsed.hostUuid, deviceUUID));
+    await db.delete(deviceLogoutRequests).where(eq(deviceLogoutRequests.hostUuid, deviceUUID));
+    await db.delete(licenseHosts).where(eq(licenseHosts.hostUuid, deviceUUID));
+    await db.delete(publicShareLinks).where(eq(publicShareLinks.hostId, deviceUUID));
+    await db.delete(tunnels).where(eq(tunnels.hostId, deviceUUID));
+    await db.delete(deviceRecoveryRequests).where(
+      or(
+        eq(deviceRecoveryRequests.oldDeviceId, deviceUUID),
+        eq(deviceRecoveryRequests.newDeviceId, deviceUUID),
+      ),
+    );
+    await db.delete(subscriptionRequests).where(eq(subscriptionRequests.deviceId, deviceUUID));
+    await db.delete(payments).where(eq(payments.deviceId, deviceUUID));
+    await db.delete(users).where(eq(users.userId, deviceUUID));
+    await db.delete(hosts).where(eq(hosts.hostUuid, deviceUUID));
+
+    return true;
   }
 
   // === SUPPORT ===
