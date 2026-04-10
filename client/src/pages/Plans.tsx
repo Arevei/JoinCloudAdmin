@@ -7,7 +7,7 @@ const TIERS = [
   {
     name: "Free",
     color: "secondary" as const,
-    shareLimitMonthly: "5 / month",
+    shareLimitMonthly: "10 / month",
     fileSizeLimit: "2 GB",
     linkExpiryMax: "24 hours",
     devices: "1 device",

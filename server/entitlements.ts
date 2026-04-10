@@ -41,7 +41,7 @@ export const TIER_DEFAULTS: Record<Tier, Entitlements> = {
     maxUsers: 1,
     maxDevicesPerUser: 1,
     maxDevicesTotal: 1,
-    shareLimitMonthly: 5,
+    shareLimitMonthly: 10,
     fileSizeLimitMb: 2048,             // 2 GB
     linkExpiryMaxDays: 1,              // max 24 hours
     resumableDownloads: false,

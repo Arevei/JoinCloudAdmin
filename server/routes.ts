@@ -3054,6 +3054,8 @@ export async function registerRoutes(
         state: "active",
         tier: freeTier,
         expiresAt: FREE_TIER_NO_EXPIRY,
+        deviceLimit: freeDeviceLimit,
+        shareLimitMonthly: TIER_DEFAULTS.FREE.shareLimitMonthly,
       });
       res.json({ success: true, state: "active", tier: freeTier });
     } catch (err) {

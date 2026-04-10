@@ -1,6 +1,7 @@
 import { storage, type License } from "./storage";
 import { signLicense } from "./license-sign";
 import { emitLicenseUpdated } from "./license-events";
+import { TIER_DEFAULTS } from "./entitlements";
 
 /** Free tier has no expiration; use far-future Unix timestamp (year 2038 safe). */
 const FREE_TIER_NO_EXPIRY = 2147483647;
@@ -72,6 +73,8 @@ export async function runLicenseExpirySweep(): Promise<LicenseExpirySweepResult>
           state: "active",
           tier: freeTier,
           expiresAt: FREE_TIER_NO_EXPIRY,
+          deviceLimit: freeDeviceLimit,
+          shareLimitMonthly: TIER_DEFAULTS.FREE.shareLimitMonthly,
         });
 
         result.markedExpired += 1;
