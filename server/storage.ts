@@ -1,5 +1,6 @@
 import { eq, and, sql, desc, asc, lt, gte, or, inArray, max } from "drizzle-orm";
 import { db } from "./db";
+import { getTimeUnitSeconds } from "./license-time";
 import {
   users,
   dailyMetrics,
@@ -2001,8 +2002,7 @@ export class DrizzleStorage implements IStorage {
   async getOrCreateDeviceTrial(deviceId: string, trialDays = 7): Promise<{ trialStartedAt: string; trialEndsAt: string; trialExtendedAt: string | null }> {
     const now = new Date();
     const nowIso = now.toISOString();
-    // In dev mode 1 "day unit" = 1 minute; in production 1 "day unit" = 24 hours.
-    const TIME_UNIT_MS = process.env.DEV_MODE === "true" ? 60 * 1000 : 24 * 60 * 60 * 1000;
+    const TIME_UNIT_MS = getTimeUnitSeconds() * 1000;
     const endsAtIso = new Date(now.getTime() + trialDays * TIME_UNIT_MS).toISOString();
 
     const existing = await db.select().from(deviceTrials).where(eq(deviceTrials.deviceId, deviceId)).limit(1);

@@ -74,6 +74,7 @@ const DEV_TRIAL_MINUTES_DEFAULT = 7;
 const DEV_TRIAL_MINUTES_MIN = 1;
 const DEV_TRIAL_MINUTES_MAX = 60;
 const DEV_EXPIRY_WARNING_MINUTES_DEFAULT = 2;
+const pendingInitialDeviceLicense = new Map<string, Promise<void>>();
 
 /** Trial duration in seconds for new trials. In dev uses admin-setting dev_trial_minutes; in prod uses TRIAL_DAYS * TIME_UNIT_SECS. */
 async function getTrialDurationSeconds(): Promise<number> {
@@ -103,6 +104,78 @@ async function getDevExpiryWarningMinutes(): Promise<number> {
   const raw = await storage.getSetting("dev_expiry_warning_minutes");
   const n = parseInt(raw || String(DEV_EXPIRY_WARNING_MINUTES_DEFAULT), 10);
   return Number.isFinite(n) && n >= 0 ? n : DEV_EXPIRY_WARNING_MINUTES_DEFAULT;
+}
+
+async function ensureInitialDeviceLicense(hostUuid: string): Promise<void> {
+  const existingPending = pendingInitialDeviceLicense.get(hostUuid);
+  if (existingPending) {
+    await existingPending;
+    return;
+  }
+
+  const work = (async () => {
+    await storage.ensureHostRow(hostUuid);
+
+    let license = await storage.getLicenseForHost(hostUuid);
+    if (license) return;
+
+    const existingForAccount = await storage.getActiveLicenseForAccount(hostUuid);
+    if (existingForAccount) {
+      try { await storage.addLicenseHost(existingForAccount.id, hostUuid); } catch (_) {}
+      return;
+    }
+
+    if (!(await storage.isDeviceTrialUsed(hostUuid))) {
+      await storage.ensureDeviceAccount(hostUuid);
+      const licenseId = await storage.getNextLicenseId();
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const trial = await storage.getOrCreateDeviceTrial(hostUuid, await getTrialDurationDaysForStorage());
+      const expiresAt = Math.floor(new Date(trial.trialEndsAt).getTime() / 1000);
+      const signature = signLicense({
+        license_id: licenseId,
+        account_id: hostUuid,
+        tier: "trial",
+        device_limit: 5,
+        issued_at: issuedAt,
+        expires_at: expiresAt,
+        state: "trial_active",
+        features: { smart_workspaces: true, activity_feed: true },
+      });
+      await storage.createLicense({
+        id: licenseId,
+        accountId: hostUuid,
+        tier: "trial",
+        deviceLimit: 5,
+        issuedAt,
+        expiresAt,
+        state: "trial_active",
+        signature,
+      });
+      await storage.addLicenseHost(licenseId, hostUuid);
+      await storage.setDeviceTrialUsed(hostUuid);
+      return;
+    }
+
+    const licenseId = await storage.getNextLicenseId();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const signature = signLicense({
+      license_id: licenseId,
+      account_id: hostUuid,
+      tier: "FREE",
+      device_limit: 1,
+      issued_at: nowSec,
+      expires_at: FREE_TIER_NO_EXPIRY,
+      state: "active",
+    });
+    await storage.createDeviceOnlyLicense(hostUuid, "FREE", FREE_TIER_NO_EXPIRY, signature, licenseId);
+  })();
+
+  pendingInitialDeviceLicense.set(hostUuid, work);
+  try {
+    await work;
+  } finally {
+    pendingInitialDeviceLicense.delete(hostUuid);
+  }
 }
 
 export async function registerRoutes(
@@ -3407,19 +3480,7 @@ export async function registerRoutes(
       if (hostUuid && hostUuid.length >= 8 && hostUuid.length <= 128) {
         license = await storage.getLicenseForHost(hostUuid);
         if (!license && !logoutRequested) {
-          await storage.ensureHostRow(hostUuid);
-          const licenseId = await storage.getNextLicenseId();
-          const nowSec = Math.floor(Date.now() / 1000);
-          const signature = signLicense({
-            license_id: licenseId,
-            account_id: hostUuid,
-            tier: "FREE",
-            device_limit: 1,
-            issued_at: nowSec,
-            expires_at: FREE_TIER_NO_EXPIRY,
-            state: "active",
-          });
-          await storage.createDeviceOnlyLicense(hostUuid, "FREE", FREE_TIER_NO_EXPIRY, signature, licenseId);
+          await ensureInitialDeviceLicense(hostUuid);
           license = await storage.getLicenseForHost(hostUuid);
         }
       }

@@ -96,6 +96,27 @@ interface DeviceAccountSummary {
   } | null;
 }
 
+function resolveShareLimit(tier: string | null | undefined, state: string | null | undefined): number | null {
+  const normalizedState = String(state || "").toLowerCase();
+  if (normalizedState === "trial_active" || normalizedState === "trial") return 20;
+
+  switch (String(tier || "").toLowerCase()) {
+    case "free":
+      return 10;
+    case "pro":
+      return 50;
+    case "teams":
+      return 100;
+    case "pro_plus":
+    case "pro+":
+      return null;
+    case "custom":
+      return 10;
+    default:
+      return 10;
+  }
+}
+
 export default function UserDetails() {
   const { deviceUUID } = useParams<{ deviceUUID: string }>();
   const queryClient = useQueryClient();
@@ -144,9 +165,9 @@ export default function UserDetails() {
           graceEndsAt: summary.license.grace_ends_at ?? null,
           renewalAt: summary.subscription?.renewal_at ? Math.floor(new Date(summary.subscription.renewal_at).getTime() / 1000) : null,
           customQuota: null,
-          shareLimit: null,
-          teamEnabled: false,
-          maxTeams: 0,
+          shareLimit: resolveShareLimit(summary.license.tier, summary.license.state),
+          teamEnabled: String(summary.license.tier || "").toLowerCase() === "teams",
+          maxTeams: String(summary.license.tier || "").toLowerCase() === "teams" ? 3 : 0,
         };
       }
       const res = await fetch(`/api/admin/licenses`);
@@ -169,9 +190,9 @@ export default function UserDetails() {
         graceEndsAt: summary.license.grace_ends_at ?? null,
         renewalAt: summary.subscription?.renewal_at ? Math.floor(new Date(summary.subscription.renewal_at).getTime() / 1000) : null,
         customQuota: null,
-        shareLimit: null,
-        teamEnabled: false,
-        maxTeams: 0,
+        shareLimit: resolveShareLimit(summary.license.tier, summary.license.state),
+        teamEnabled: String(summary.license.tier || "").toLowerCase() === "teams",
+        maxTeams: String(summary.license.tier || "").toLowerCase() === "teams" ? 3 : 0,
       };
     },
     enabled: !!deviceUUID && (!!targetLicenseId || !!summary?.license),
