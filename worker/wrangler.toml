@@ -10,6 +10,7 @@ routes = [
 CONTROL_PLANE = "https://plane.joincloud.in"
 
 # R2 bucket — stores cached files served to concurrent downloaders
+# Requires Workers Paid plan. Re-enable once plan is active.
 # Create with: wrangler r2 bucket create joincloud-share-cache
 [[r2_buckets]]
 binding = "joincloud_share_cache"

@@ -1,3 +1,7 @@
+// In-memory cache for shortId → tunnel resolution (per Worker isolate, 30 s TTL).
+// Eliminates repeated control-plane round trips for PDF.js range requests.
+const _resolveCache = new Map();
+
 const CONTROL_PLANE = "https://plane.joincloud.in";
 
 // Only cache simple single-file downloads, not ZIP, HLS segments, or previews
@@ -102,6 +106,30 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // ── Serve PDF.js library files for the share-page PDF viewer ─────────────
+    // The sharer's device may be offline; the Worker always has internet.
+    // Files are fetched from cdnjs and cached in the CF edge cache for 24 h.
+    if (url.pathname === "/pdf.min.js" || url.pathname === "/pdf.worker.min.js") {
+      const cdnBase = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174";
+      const cdnUrl = url.pathname === "/pdf.min.js"
+        ? `${cdnBase}/pdf.min.js`
+        : `${cdnBase}/pdf.worker.min.js`;
+      const cacheKey = new Request(cdnUrl);
+      const cached = await caches.default.match(cacheKey);
+      if (cached) return cached;
+      const upstream = await fetch(cdnUrl);
+      if (!upstream.ok) return new Response("PDF.js unavailable", { status: 502 });
+      const response = new Response(upstream.body, {
+        headers: {
+          "content-type": "application/javascript; charset=utf-8",
+          "cache-control": "public, max-age=86400",
+          "access-control-allow-origin": "*",
+        },
+      });
+      ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+      return response;
+    }
+
     const match = url.pathname.match(/^\/s\/([A-Za-z0-9_-]+)(\/.*)?$/);
     if (!match) {
       return new Response("Not found", { status: 404 });
@@ -123,19 +151,24 @@ export default {
       }
     }
 
-    // ── Resolve short ID → tunnel URL via admin control plane ───────────────
-    const resolveRes = await fetch(
-      `${CONTROL_PLANE}/api/v1/share/resolve/${shortId}`,
-      { headers: { "x-worker-secret": env.WORKER_SECRET } }
-    );
-
-    if (!resolveRes.ok) {
-      return new Response("Share not found or expired", {
-        status: resolveRes.status,
-      });
+    // ── Resolve short ID → tunnel URL (with 30 s in-memory cache) ───────────
+    let tunnelUrl, shareId, token, exp;
+    const _cached = _resolveCache.get(shortId);
+    if (_cached && Date.now() - _cached.at < 30_000) {
+      ({ tunnelUrl, shareId, token, exp } = _cached);
+    } else {
+      const resolveRes = await fetch(
+        `${CONTROL_PLANE}/api/v1/share/resolve/${shortId}`,
+        { headers: { "x-worker-secret": env.WORKER_SECRET } }
+      );
+      if (!resolveRes.ok) {
+        return new Response("Share not found or expired", {
+          status: resolveRes.status,
+        });
+      }
+      ({ tunnelUrl, shareId, token, exp } = await resolveRes.json());
+      _resolveCache.set(shortId, { tunnelUrl, shareId, token, exp, at: Date.now() });
     }
-
-    const { tunnelUrl, shareId, token, exp } = await resolveRes.json();
 
     // ── Priority 2: Concurrent detection → trigger R2 cache ─────────────────
     if (isCacheableDownload(subPath) && env.CONCURRENT_KV && env.joincloud_share_cache) {
